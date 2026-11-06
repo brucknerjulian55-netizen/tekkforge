@@ -16,6 +16,7 @@ static juce::String prettyValue (float v, const juce::String& unit)
 juce::AudioProcessorValueTreeState::ParameterLayout TekkforgeProcessor::makeLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    tk::WavetableBank::get().addUser();
     const auto& table = params();
     for (int i = 0; i < NUM_PARAMS; ++i)
     {
@@ -63,6 +64,7 @@ TekkforgeProcessor::TekkforgeProcessor()
                                        .withInput ("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "TEKKFORGE", makeLayout())
 {
+    tk::WavetableBank::get().addUser();
     const auto& table = params();
     for (int i = 0; i < NUM_PARAMS; ++i)
     {
@@ -80,7 +82,7 @@ TekkforgeProcessor::TekkforgeProcessor()
     liveSamples.resize (NUM_MODES * NUM_LAYERS);
     formats.registerBasicFormats();
 }
-TekkforgeProcessor::~TekkforgeProcessor() { cancelPendingUpdate(); }
+TekkforgeProcessor::~TekkforgeProcessor() { cancelPendingUpdate(); tk::WavetableBank::get().removeUser(); }
 
 void TekkforgeProcessor::installSample (int slot, std::unique_ptr<SampleData> data)
 {
@@ -299,13 +301,46 @@ std::unique_ptr<juce::XmlElement> TekkforgeProcessor::stateToXml()
             smp.addChild (e, -1, nullptr);
         }
     state.addChild (smp, -1, nullptr);
+    state.setProperty ("format", 4, nullptr);
     return state.createXml();
+}
+
+/** Presets vor 0.4: Filterarten lagen auf anderen Nummern, Welle war ein Regler und die Tonlage gab es nicht. */
+static void migrateOldState (juce::ValueTree& state)
+{
+    if ((int) state.getProperty ("format", 0) >= 4) return;
+    const auto find = [&] (const juce::String& id) { for (auto c : state) if (c.getProperty ("id").toString() == id) return c; return juce::ValueTree(); };
+    const auto put = [&] (const juce::String& id, float v)
+    {
+        auto c = find (id);
+        if (! c.isValid()) { c = juce::ValueTree ("PARAM"); c.setProperty ("id", id, nullptr); state.addChild (c, -1, nullptr); }
+        c.setProperty ("value", v, nullptr);
+    };
+    const auto& table = params();
+    for (int m = 0; m < NUM_MODES; ++m)
+        for (int l = 0; l < NUM_LAYERS; ++l)
+        {
+            const auto idOf = [&] (int p) { return juce::String (table[(size_t) modeParam (m, Y (l, p))].id); };
+            if (auto c = find (idOf (LY_FTYPE)); c.isValid())
+            {
+                static const int map[4] = { 0, 2, 4, 9 };
+                c.setProperty ("value", map[juce::jlimit (0, 3, (int) c.getProperty ("value"))], nullptr);
+            }
+            if (auto c = find (idOf (LY_WAVE)); c.isValid())
+            {
+                static const int tables[5] = { 0, 1, 2, 3, tk::WT_NOISE_INDEX };
+                put (idOf (LY_TABLE), (float) tables[juce::jlimit (0, 4, juce::roundToInt ((float) c.getProperty ("value")))]);
+                c.setProperty ("value", 0.0f, nullptr);
+            }
+            put (idOf (LY_KEY), 0.0f);
+        }
 }
 
 void TekkforgeProcessor::stateFromXml (const juce::XmlElement& xml)
 {
     if (! xml.hasTagName (apvts.state.getType())) return;
     auto state = juce::ValueTree::fromXml (xml);
+    migrateOldState (state);
     if (auto c = state.getChildWithName ("CURVES"); c.isValid())
     {
         for (int l = 0; l < NUM_LFOS; ++l)

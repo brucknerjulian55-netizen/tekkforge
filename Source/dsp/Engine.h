@@ -1,6 +1,6 @@
 // Tekkforge - Klangerzeugung. Jede Stimme spielt drei Ebenen. LFOs und Envs laufen wie in Vital pro Stimme.
 #pragma once
-#include "Effects.h"
+#include "Eq.h"
 #include <array>
 #include <atomic>
 
@@ -151,7 +151,7 @@ public:
     {
         int startAt = 0;
         if (delay > 0) { startAt = std::min (delay, n); delay -= startAt; if (startAt == n) return; }
-        const float root = 440.0f * std::pow (2.0f, ((float) note - 69.0f + pv[M_TUNE] + pv[M_FINE] * 0.01f) / 12.0f);
+        const float baseHz = 440.0f * std::pow (2.0f, ((float) note - 69.0f + pv[M_TUNE] + pv[M_FINE] * 0.01f) / 12.0f);
         const float velGain = dbToGain (pv[M_LEVEL]) * (1.0f - pv[M_VEL] * (1.0f - vel));
         const float stealC = std::exp (-6.9f / (0.003f * sr));
         float fadeEnd = fade;
@@ -163,7 +163,7 @@ public:
             if (! y.alive) continue;
             const float* q = pv + Y (l, 0);
             const bool silent = q[LY_MUTE] > 0.5f || (anySolo && q[LY_SOLO] < 0.5f) || q[LY_LVL] + q[LY_SUB] <= 0.0f;
-            renderLayer (y, q, smp != nullptr ? smp[l] : nullptr, out[l][0], out[l][1], startAt, n, sr, root, velGain, silent, stealC, fadeEnd);
+            renderLayer (y, q, smp != nullptr ? smp[l] : nullptr, out[l][0], out[l][1], startAt, n, sr, keyHz (q, baseHz), velGain, silent, stealC, fadeEnd);
             any = any || y.alive;
         }
         fade = fadeEnd;
@@ -172,14 +172,25 @@ public:
     }
 
 private:
+    /** Tonlage der Ebene: Bass-Lage faltet jede Note in 40 bis 80 Hz, Fest ignoriert die Taste. */
+    static float keyHz (const float* q, float hz)
+    {
+        const int k = (int) q[LY_KEY];
+        if (k == 1) { while (hz >= 80.0f) hz *= 0.5f; while (hz < 40.0f) hz *= 2.0f; }
+        else if (k == 2) hz = 440.0f * std::pow (2.0f, (q[LY_ROOT] - 69.0f) / 12.0f);
+        return hz;
+    }
     struct Layer
     {
         bool alive = false, released = false, smpDone = false;
         int t = 0, tail = 0;
         float ph[MAX_UNISON] {}, sub = 0, relLevel = 1, relSmp = 1, lastEnv = 0;
         double smpPos = -1.0;
-        OnePole toneL, toneR, lc[4];
-        Svf f[2];
+        OnePole toneL, toneR, lc[4], monoL, monoR;
+        Svf f[4], fm[6];
+        float comb[2][2048] {}, combLen = 100.0f, lastOut = 0, h2 = 0, h3 = 0, h5 = 0, glide = 0;
+        int combPos = 0;
+        Biquad pre[2];
     };
 
     void renderLayer (Layer& y, const float* q, const SampleData* s, float* L, float* R, int from, int n, float sr, float root, float velGain, bool silent, float stealC, float& fadeOut)
@@ -190,11 +201,25 @@ private:
         const float sus = holdMode ? q[LY_SUS] : 0.0f, aC = 0.6f + q[LY_CURVE] * 5.4f;
         const float relC = std::exp (-6.9f / std::max (1.0f, q[LY_REL] * 0.001f * sr));
         const float pT = q[LY_PTIME] * 0.001f * sr, pAmt = q[LY_PAMT], pC = 1.0f + q[LY_PCURVE] * 9.0f;
-        const int ftype = (int) q[LY_FTYPE], dT = (int) q[LY_DRVTYPE];
+        const int ftype = (int) q[LY_FTYPE], dT = (int) q[LY_DRVTYPE], d2T = (int) q[LY_DRV2TYPE];
+        const int table = std::clamp ((int) q[LY_TABLE], 0, NUM_TABLES - 1), warp = (int) q[LY_WARP];
+        const float warpA = q[LY_WARPAMT], pos = q[LY_WAVE], glide = q[LY_GLIDE], h2L = q[LY_H2], h3L = q[LY_H3], h5L = q[LY_H5];
+        const auto& bank = WavetableBank::get();
+        const bool tableOk = table != WT_NOISE_INDEX && bank.ready (table), isNoise = table == WT_NOISE_INDEX;
+        const float phaseSign = q[LY_PHASE] > 0.5f ? -1.0f : 1.0f;
+        const bool preOn = q[LY_PREAMT] > 0.01f;
+        if (preOn) { y.pre[0].set (Biquad::PEAK, q[LY_PREF], q[LY_PREAMT], 1.2f, sr); y.pre[1].set (Biquad::PEAK, q[LY_PREF], q[LY_PREAMT], 1.2f, sr); }
+        const float drv2 = q[LY_DRV2], d2Gain = std::pow (10.0f, drv2 * 36.0f / 20.0f), d2Comp = 1.0f / (1.0f + 1.2f * drv2);
+        const bool monoOn = q[LY_MONO] > 20.5f;
+        if (monoOn) { y.monoL.set (q[LY_MONO], sr); y.monoR.set (q[LY_MONO], sr); }
+        const float combRes = 0.5f + q[LY_RES] * 0.48f;
+        if (ftype == 8)
+            for (int k = 0; k < 3; ++k)
+                for (int c = 0; c < 2; ++c) y.fm[k * 2 + c].set (formantHz (q[LY_CUT], k), 0.7f + q[LY_RES] * 0.28f, sr);
         const float drv = q[LY_DRV], dGain = std::pow (10.0f, drv * 40.0f / 20.0f), dComp = 1.0f / (1.0f + 1.2f * drv);
         const float subL = q[LY_SUB], subDiv = std::pow (2.0f, -std::round (q[LY_SUBOCT]));
         const float mul = std::pow (2.0f, (q[LY_TUNE] + q[LY_FINE] * 0.01f) / 12.0f);
-        const float wave = std::clamp (q[LY_WAVE], 0.0f, 4.0f), panV = std::clamp (q[LY_PAN], -1.0f, 1.0f);
+        const float panV = std::clamp (q[LY_PAN], -1.0f, 1.0f);
         const float gl = std::sqrt (0.5f * (1.0f - panV)) * 1.4142f, gr = std::sqrt (0.5f * (1.0f + panV)) * 1.4142f;
         const bool lowcut = q[LY_LOWCUT] > 20.5f;
         if (drv > 0.0001f) { y.toneL.set (q[LY_DRVTONE], sr); y.toneR.set (q[LY_DRVTONE], sr); }
@@ -226,11 +251,12 @@ private:
         for (int i = from; i < n; ++i)
         {
             const float tf = (float) y.t;
-            if ((y.t & 15) == 0 && ftype < 3)
+            if ((y.t & 15) == 0 && ftype < 8)
             {
                 const float fe = std::exp (-tf / std::max (1.0f, q[LY_FDEC] * 0.001f * sr));
                 const float hz = q[LY_CUT] * std::pow (2.0f, q[LY_FAMT] * fe);
-                y.f[0].set (hz, q[LY_RES], sr); y.f[1].set (hz, q[LY_RES], sr);
+                for (auto& fl : y.f) fl.set (hz, q[LY_RES], sr);
+                y.combLen = std::clamp (sr / std::max (hz, 30.0f), 2.0f, 2040.0f);
             }
             float env;
             if (y.released) { y.relLevel *= relC; env = y.relLevel; }
@@ -241,7 +267,8 @@ private:
 
             float semis = 0;
             if (pAmt != 0.0f && tf < pT) semis = pAmt * std::pow (1.0f - tf / pT, pC);
-            const float bend = semis != 0.0f ? std::pow (2.0f, semis / 12.0f) : 1.0f;
+            float bend = semis != 0.0f ? std::pow (2.0f, semis / 12.0f) : 1.0f;
+            if (glide != 0.0f) bend *= std::pow (2.0f, glide * std::min (tf / tD, 1.0f) / 12.0f);   // Tail Pitch ueber die Laenge
             const float freq = root * bend;
 
             float l = 0, r = 0;
@@ -269,7 +296,9 @@ private:
                 for (int u = 0; u < uni; ++u)
                 {
                     const float dt = std::min (hz * det[u] / sr, 0.49f);
-                    const float o = morphOsc (y.ph[u], dt, wave, wave > 3.0f ? rand01() * 2.0f - 1.0f : 0.0f);
+                    const float rp = warp == 0 ? y.ph[u] : warpPhase (y.ph[u], warp, warpA, y.lastOut);
+                    const float o = isNoise ? rand01() * 2.0f - 1.0f : tableOk ? bank.read (table, pos, rp, dt) : std::sin (2.0f * kPi * rp);
+                    y.lastOut = o;
                     y.ph[u] += dt; if (y.ph[u] >= 1.0f) y.ph[u] -= 1.0f;
                     l += o * pl[u]; r += o * pr[u];
                 }
@@ -278,23 +307,70 @@ private:
             if (y.released) y.relSmp *= relC;
             l *= q[LY_LVL]; r *= q[LY_LVL];
 
+            // Filter
             float lo, hi, ba;
-            if (ftype < 3)
+            const auto one = [&] (int c, float x)
             {
-                y.f[0].tick (l, lo, hi, ba); l = ftype == 0 ? lo : ftype == 1 ? hi : ba;
-                y.f[1].tick (r, lo, hi, ba); r = ftype == 0 ? lo : ftype == 1 ? hi : ba;
-            }
+                switch (ftype)
+                {
+                    case 0: y.f[c].tick (x, lo, hi, ba); return lo;
+                    case 1: y.f[c].tick (x, lo, hi, ba); y.f[c + 2].tick (lo, lo, hi, ba); return lo;
+                    case 2: y.f[c].tick (x, lo, hi, ba); return hi;
+                    case 3: y.f[c].tick (x, lo, hi, ba); y.f[c + 2].tick (hi, lo, hi, ba); return hi;
+                    case 4: y.f[c].tick (x, lo, hi, ba); return ba;
+                    case 5: y.f[c].tick (x, lo, hi, ba); return lo + hi;
+                    case 6: case 7:
+                    {
+                        auto& line = y.comb[c];
+                        float pp = (float) y.combPos - y.combLen; if (pp < 0) pp += 2048.0f;
+                        const int a = (int) pp & 2047; const float fr2 = pp - std::floor (pp);
+                        const float d = line[a] + (line[(a + 1) & 2047] - line[a]) * fr2;
+                        line[y.combPos] = softClip (x + (ftype == 6 ? combRes : -combRes) * d);
+                        return 0.5f * (x + (ftype == 6 ? d : -d));
+                    }
+                    case 8:
+                    {
+                        float sum = 0;
+                        for (int k = 0; k < 3; ++k) { y.fm[k * 2 + c].tick (x, lo, hi, ba); sum += ba * (k == 0 ? 1.0f : 0.7f); }
+                        return sum * 1.2f;
+                    }
+                    default: return x;
+                }
+            };
+            l = one (0, l); r = one (1, r);
+            y.combPos = (y.combPos + 1) & 2047;
+
+            // Zweistufige Verzerrung: Boost davor gibt den Stufen einen Bereich, den sie aufreissen
+            if (preOn) { l = y.pre[0].process (l); r = y.pre[1].process (r); }
             if (drv > 0.0001f)
             {
                 l = y.toneL.lp (shape (l * dGain, dT) * dComp);
                 r = y.toneR.lp (shape (r * dGain, dT) * dComp);
             }
+            if (drv2 > 0.0001f) { l = shape (l * d2Gain, d2T) * d2Comp; r = shape (r * d2Gain, d2T) * d2Comp; }
             if (subL > 0.0f)
             {
                 const float o = std::sin (2.0f * kPi * y.sub) * subL * env;
                 y.sub += std::min (freq * mul * subDiv / sr, 0.49f); if (y.sub >= 1.0f) y.sub -= 1.0f;
                 l += o; r += o;
             }
+            // Zusaetzliche Obertoene ueber dem Grundton, sauber nach der Verzerrung
+            if (h2L + h3L + h5L > 0.0f)
+            {
+                const float d0 = std::min (freq * mul / sr, 0.08f);
+                y.h2 += d0 * 2; y.h3 += d0 * 3; y.h5 += d0 * 5;
+                y.h2 -= std::floor (y.h2); y.h3 -= std::floor (y.h3); y.h5 -= std::floor (y.h5);
+                const float o = env * (h2L * std::sin (2 * kPi * y.h2) + h3L * std::sin (2 * kPi * y.h3) + h5L * std::sin (2 * kPi * y.h5));
+                l += o; r += o;
+            }
+            if (monoOn)
+            {
+                // Unter der Grenze bleibt nur die Mitte
+                const float s = 0.5f * (l - r);
+                const float lowS = y.monoL.lp (s);
+                l -= lowS; r += lowS;
+            }
+            l *= phaseSign; r *= phaseSign;
             if (lowcut) { l = y.lc[1].hp (y.lc[0].hp (l)); r = y.lc[3].hp (y.lc[2].hp (r)); }
             if (stolen) fadeNow *= stealC;
             if (! silent)
@@ -334,18 +410,20 @@ public:
         for (auto& l : sourceView) l.store (0.0f);
     }
 
-    void allocate (float maxSampleRate) { for (auto& s : slots) s.allocate (maxSampleRate); }
+    void allocate (float maxSampleRate) { for (auto& s : slots) s.allocate (maxSampleRate); WavetableBank::get().prepare(); }
 
     void setSampleRate (float s)
     {
         sr = s;
         for (auto& x : slots) x.setSampleRate (s);
+        for (auto& x : eqs) x.setSampleRate (s);
         for (auto& v : voices) v.active = false;
     }
     void reset()
     {
         for (auto& v : voices) { v.active = false; v.mod.clear(); }
         for (auto& x : slots) x.reset();
+        for (auto& x : eqs) x.reset();
         global.clear();
         held = 0;
     }
@@ -485,9 +563,11 @@ private:
                 const int i = layerSlot (l, s);
                 slots[(size_t) i].process (buf[l][0], buf[l][1], c, cur + slotParam (i, 0));
             }
+            eqs[(size_t) l + 1].process (buf[l][0], buf[l][1], c, cur + eqParam (l + 1, 0, 0));
             for (int i = 0; i < c; ++i) { L[i] += buf[l][0][i]; R[i] += buf[l][1][i]; }
         }
         for (int s = 0; s < NUM_MASTER_SLOTS; ++s) slots[(size_t) s].process (L, R, c, cur + slotParam (s, 0));
+        eqs[0].process (L, R, c, cur + eqParam (0, 0, 0));
 
         const float target = dbToGain (cur[G_MASTER]), step = (target - gainNow) / (float) c;
         const bool lim = values[G_LIMIT] > 0.5f;
@@ -510,5 +590,6 @@ private:
     unsigned seed = 0x12345;
     std::array<Voice, NUM_VOICES> voices;
     std::array<FxSlot, NUM_SLOTS> slots;
+    std::array<ProEq, NUM_EQS> eqs;
 };
 } // namespace tk

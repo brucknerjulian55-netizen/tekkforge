@@ -53,6 +53,7 @@ int main()
 {
     int fails = 0;
     const auto check = [&] (bool ok, const char* what) { if (! ok) { ++fails; std::printf ("FEHLER: %s\n", what); } };
+    WavetableBank::get().wait();
     auto eng = std::make_unique<Engine>();
     eng->allocate (SR); eng->setSampleRate (SR);
     std::printf ("params=%d\n", NUM_PARAMS);
@@ -98,16 +99,141 @@ int main()
             std::printf ("  %-10s Aenderung %6.1f dB\n", name, db);
             check (db > -22, name);
         };
-        effect (LY_WAVE, 2.0f, "Welle"); effect (LY_DRV, 0.8f, "Drive"); effect (LY_CUT, 300.0f, "Cutoff"); effect (LY_PAMT, 60.0f, "Pitch");
+        effect (LY_TABLE, 2.0f, "Welle"); effect (LY_DRV, 0.8f, "Drive"); effect (LY_CUT, 300.0f, "Cutoff"); effect (LY_PAMT, 60.0f, "Pitch");
         effect (LY_PTIME, 150.0f, "Pitch-Zeit"); effect (LY_CURVE, 0.9f, "Kurve"); effect (LY_LVL, 0.5f, "Pegel"); effect (LY_SUB, 0.8f, "Sub");
         effect (LY_TUNE, 7.0f, "Tune");
+    }
+
+    // Bass-Lage: Jede Taste muss zwischen 40 und 80 Hz landen, ohne Tune anzufassen
+    {
+        const auto Yp = [] (int l, int p) { return (size_t) modeParam (KICK, Y (l, p)); };
+        auto v = defaults(); v[G_MODE] = KICK;
+        v[Yp (1, LY_SOLO)] = 1; v[Yp (1, LY_DRV)] = 0; v[Yp (1, LY_LEN)] = 2000; v[Yp (1, LY_PAMT)] = 0;
+        for (int note : { 29, 48, 60, 72, 84 })
+        {
+            eng->reset(); std::vector<float> L, R;
+            render (*eng, v, note, 0.5f, 0.5f, L, R);
+            const double hz = hzOf (L, 0.1f, 0.45f);
+            std::printf ("Bass-Lage Note %d: %.1f Hz\n", note, hz);
+            check (hz >= 39.5 && hz < 81, "Bass-Lage");
+        }
+    }
+
+    // Wellen: Tonhoehe und keine harten Spruenge bis in hohe Lagen, Warp veraendert den Klang
+    {
+        auto v = defaults(); v[G_MODE] = MELO; v[G_LIMIT] = 0;
+        const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (MELO, p)]; };
+        for (auto& e : std::initializer_list<std::pair<int, float>> { { LY_UNI, 1 }, { LY_DRV, 0 }, { LY_FTYPE, 9 }, { LY_LOWCUT, 20 }, { LY_HOLD, 1 }, { LY_SUS, 1 }, { LY_FAMT, 0 } }) M (Y (0, e.first)) = e.second;
+        int bad = 0;
+        for (int t = 0; t < NUM_TABLES; ++t)
+        {
+            if (! std::fabs (0.0f) && false) continue;
+            M (Y (0, LY_TABLE)) = (float) t; M (Y (0, LY_WAVE)) = 0.5f;
+            eng->reset(); std::vector<float> L, R;
+            render (*eng, v, 60, 0.3f, 0.3f, L, R);
+            float pk = peak (L, 0.05f, 0.25f); bool nanv = false; for (auto x : L) nanv = nanv || ! std::isfinite (x);
+            if (pk < 0.05f || nanv) { ++bad; std::printf ("Welle %d still (%s)\n", t, waveInfos()[t].name); }
+        }
+        std::printf ("%d Wellen geprueft, Probleme %d\n", NUM_TABLES, bad); check (bad == 0, "Wellen");
+
+        M (Y (0, LY_TABLE)) = 2; M (Y (0, LY_WAVE)) = 0;
+        eng->reset(); std::vector<float> A, R, B;
+        render (*eng, v, 60, 0.3f, 0.3f, A, R);
+        for (int w = 1; w < WARP_COUNT; ++w)
+        {
+            M (Y (0, LY_WARP)) = (float) w; M (Y (0, LY_WARPAMT)) = 0.6f;
+            eng->reset(); render (*eng, v, 60, 0.3f, 0.3f, B, R);
+            double diff = 0, ref = 1e-9; for (size_t i = 0; i < A.size(); ++i) { diff += (A[i] - B[i]) * (A[i] - B[i]); ref += A[i] * A[i]; }
+            check (10 * std::log10 (diff / ref + 1e-12) > -20, warpNames()[(size_t) w].c_str());
+        }
+        M (Y (0, LY_WARP)) = 0;
+        // Alias-Test: Saege auf C8 bei 88,2 kHz, Energie zwischen den Teiltoenen muss klein bleiben
+        M (Y (0, LY_TABLE)) = 2;
+        eng->reset(); render (*eng, v, 108, 0.3f, 0.3f, A, R);
+        const double fund = tone (A, 4186.0f, 0.05f, 0.25f), between = tone (A, 6279.0f, 0.05f, 0.25f);
+        std::printf ("Saege C8: Grundton %.3f, zwischen den Teiltoenen %.5f\n", fund, between);
+        check (between < fund * 0.01, "Alias");
+    }
+
+    // Filter, Verzerrung, Bass-Charaktere
+    {
+        const auto Yp = [] (int p) { return (size_t) modeParam (KICK, Y (1, p)); };
+        auto base = defaults(); base[G_MODE] = KICK; base[Yp (LY_SOLO)] = 1; base[Yp (LY_LEN)] = 400; base[Yp (LY_TABLE)] = 2; base[Yp (LY_KEY)] = 0;
+        for (int f = 0; f < 9; ++f)
+        {
+            auto v = base; v[Yp (LY_FTYPE)] = (float) f; v[Yp (LY_CUT)] = 900; v[Yp (LY_RES)] = 0.6f;
+            eng->reset(); std::vector<float> L, R; render (*eng, v, 45, 0.4f, 0.4f, L, R);
+            bool bad = false; for (auto x : L) bad = bad || ! std::isfinite (x);
+            check (! bad && peak (L, 0.02f, 0.2f) > 0.01f, "Filtertyp");
+        }
+        for (int d = 0; d < 10; ++d)
+        {
+            auto v = base; v[Yp (LY_DRVTYPE)] = (float) d; v[Yp (LY_DRV)] = 0.7f; v[Yp (LY_DRV2)] = 0.5f; v[Yp (LY_PREAMT)] = 12;
+            eng->reset(); std::vector<float> L, R; render (*eng, v, 45, 0.4f, 0.4f, L, R);
+            bool bad = false; for (auto x : L) bad = bad || ! std::isfinite (x);
+            check (! bad && peak (L, 0.02f, 0.2f) > 0.01f && peak (L, 0.02f, 0.2f) < 2.5f, "Drive-Art");
+        }
+        for (const auto& pt : bassPatches())
+        {
+            auto v = defaults(); v[G_MODE] = KICK; v[Yp (LY_SOLO)] = 1;
+            for (auto& e : patchValues (pt)) v[Yp (e.first)] = e.second;
+            eng->reset(); std::vector<float> L, R; render (*eng, v, 60, 0.5f, 0.3f, L, R);
+            const double low = tone (L, 65.4f, 0.08f, 0.25f) + tone (L, 41.2f, 0.08f, 0.25f);
+            std::printf ("  %-16s Spitze %.2f\n", pt.name, peak (L, 0, 0.5f));
+            check (peak (L, 0, 0.5f) > 0.1f && peak (L, 0, 0.5f) < 1.6f, pt.name); (void) low;
+        }
+    }
+
+    // EQ: Glocke, Mid/Side, Cut-Flanke, Dynamik
+    {
+        auto v = defaults(); v[G_MODE] = MELO; v[G_LIMIT] = 0;
+        const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (MELO, p)]; };
+        for (auto& e : std::initializer_list<std::pair<int, float>> { { LY_TABLE, 0 }, { LY_UNI, 1 }, { LY_DRV, 0 }, { LY_FTYPE, 9 }, { LY_LOWCUT, 20 }, { LY_HOLD, 1 }, { LY_SUS, 1 }, { LY_FAMT, 0 } }) M (Y (0, e.first)) = e.second;
+        M (M_LEVEL) = 0; M (M_VEL) = 0;
+        const auto level = [&] (std::vector<float>& val)
+        {
+            eng->reset(); std::vector<float> L, R; render (*eng, val, 69, 0.4f, 0.4f, L, R);
+            return 20 * std::log10 (tone (L, 440, 0.15f, 0.35f) + 1e-9);
+        };
+        auto flat = v; const double base = level (flat);
+        auto a = v; a[(size_t) eqParam (0, 0, E_ON)] = 1; a[(size_t) eqParam (0, 0, E_FREQ)] = 440; a[(size_t) eqParam (0, 0, E_GAIN)] = 12; a[(size_t) eqParam (0, 0, E_Q)] = 2;
+        const double bell = level (a) - base;
+        auto b = v; b[(size_t) eqParam (0, 0, E_ON)] = 1; b[(size_t) eqParam (0, 0, E_TYPE)] = EQ_LOWCUT; b[(size_t) eqParam (0, 0, E_FREQ)] = 880; b[(size_t) eqParam (0, 0, E_SLOPE)] = 2;
+        const double cut48 = level (b) - base;
+        b[(size_t) eqParam (0, 0, E_SLOPE)] = 0; const double cut12 = level (b) - base;
+        auto c = a; c[(size_t) eqParam (0, 0, E_STEREO)] = ES_SIDE; const double side = level (c) - base;
+        auto d = v; d[(size_t) eqParam (0, 0, E_ON)] = 1; d[(size_t) eqParam (0, 0, E_FREQ)] = 440; d[(size_t) eqParam (0, 0, E_DYN)] = -12; d[(size_t) eqParam (0, 0, E_THR)] = -30;
+        const double dynG = level (d) - base;
+        auto e = v; e[(size_t) eqParam (2, 0, E_ON)] = 1; e[(size_t) eqParam (1, 0, E_ON)] = 1; e[(size_t) eqParam (1, 0, E_FREQ)] = 440; e[(size_t) eqParam (1, 0, E_GAIN)] = -12; e[(size_t) eqParam (1, 0, E_Q)] = 2;
+        const double layerEq = level (e) - base;
+        std::printf ("EQ: Glocke +12 = %+.1f, Low Cut 48 dB %.1f, 12 dB %.1f, nur Side %+.1f, Dynamik %+.1f, Ebenen-EQ %+.1f\n", bell, cut48, cut12, side, dynG, layerEq);
+        check (std::fabs (bell - 12) < 0.5, "EQ Glocke"); check (cut48 < -22 && cut12 > -16 && cut12 < -8, "EQ Flanke"); check (std::fabs (side) < 0.5, "EQ Side");
+        check (dynG < -5, "EQ Dynamik"); check (std::fabs (layerEq + 12) < 0.5, "EQ Ebene");
+    }
+
+    // Neue Effekte: Alle Regler am Anschlag duerfen weder NaN noch Spruenge erzeugen, Standard darf nicht verstummen
+    {
+        for (int t = FX_OTT; t < FX_TYPES; ++t)
+            for (int vals = 0; vals < 3; ++vals)
+            {
+                auto v = defaults(); v[G_MODE] = MELO; v[G_LIMIT] = 0;
+                v[(size_t) slotParam (0, S_TYPE)] = (float) t; v[(size_t) slotParam (0, S_MIX)] = 1;
+                const auto* info = fxInfo (t);
+                for (int k = 0; k < FX_PARAMS; ++k)
+                    v[(size_t) slotParam (0, S_P1 + k)] = vals == 0 ? info[k].def : vals == 1 ? info[k].min : info[k].max;
+                eng->reset(); std::vector<float> L, R; render (*eng, v, 60, 0.4f, 0.4f, L, R);
+                bool bad = false; float pk = 0; for (auto x : L) { bad = bad || ! std::isfinite (x); pk = std::max (pk, std::fabs (x)); }
+                if (bad || pk > 30 || (vals == 0 && pk < 0.005f)) std::printf ("FX %s Satz %d: Spitze %.3f\n", fxNames()[(size_t) t].c_str(), vals, pk);
+                check (! bad && pk <= 30, fxNames()[(size_t) t].c_str());
+                if (vals == 0) check (pk > 0.005f, "FX klingt");
+            }
     }
 
     // Stimmung
     {
         auto v = defaults(); v[G_MODE] = KICK;
         const auto Yp = [] (int l, int p) { return (size_t) modeParam (KICK, Y (l, p)); };
-        v[Yp (1, LY_SOLO)] = 1; v[Yp (1, LY_DRV)] = 0; v[Yp (1, LY_LEN)] = 2000; v[Yp (1, LY_LOWCUT)] = 20;
+        v[Yp (1, LY_SOLO)] = 1; v[Yp (1, LY_DRV)] = 0; v[Yp (1, LY_LEN)] = 2000; v[Yp (1, LY_LOWCUT)] = 20; v[Yp (1, LY_KEY)] = 0;
         eng->reset(); std::vector<float> L, R;
         render (*eng, v, 29, 1.0f, 1.0f, L, R);
         const double hz = hzOf (L, 0.15f, 0.7f);
@@ -139,7 +265,7 @@ int main()
         eng->curves = &curves; eng->modView = &view;
         auto v = defaults(); v[G_MODE] = KICK; v[G_LIMIT] = 0;
         const auto Yp = [] (int l, int p) { return (size_t) modeParam (KICK, Y (l, p)); };
-        v[Yp (1, LY_SOLO)] = 1; v[Yp (1, LY_PAMT)] = 0; v[Yp (1, LY_DRV)] = 0; v[Yp (1, LY_LEN)] = 2000; v[Yp (1, LY_LOWCUT)] = 20;
+        v[Yp (1, LY_SOLO)] = 1; v[Yp (1, LY_PAMT)] = 0; v[Yp (1, LY_DRV)] = 0; v[Yp (1, LY_LEN)] = 2000; v[Yp (1, LY_LOWCUT)] = 20; v[Yp (1, LY_KEY)] = 0;
         v[(size_t) modSlot (0, MD_SOURCE)] = NUM_LFOS; v[(size_t) modSlot (0, MD_TARGET)] = (float) modeParam (KICK, Y (1, LY_TUNE)); v[(size_t) modSlot (0, MD_AMOUNT)] = 0.5f;
         v[(size_t) envParam (0, EV_DEC)] = 300;
         eng->reset(); std::vector<float> L, R;
@@ -167,10 +293,10 @@ int main()
         auto v = defaults(); v[G_MODE] = MELO; v[G_LIMIT] = 0;
         const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (MELO, p)]; };
         M (M_LEVEL) = 0; M (M_VEL) = 0;
-        for (auto& e : std::initializer_list<std::pair<int, float>> { { LY_WAVE, 0 }, { LY_UNI, 1 }, { LY_DRV, 0 }, { LY_FTYPE, 3 }, { LY_LOWCUT, 20 }, { LY_HOLD, 1 }, { LY_SUS, 1 }, { LY_FAMT, 0 } })
+        for (auto& e : std::initializer_list<std::pair<int, float>> { { LY_TABLE, 0 }, { LY_UNI, 1 }, { LY_DRV, 0 }, { LY_FTYPE, 9 }, { LY_LOWCUT, 20 }, { LY_HOLD, 1 }, { LY_SUS, 1 }, { LY_FAMT, 0 } })
             M (Y (0, e.first)) = e.second;
         M (Y (1, LY_MUTE)) = 0; M (Y (1, LY_LVL)) = 0.8f; M (Y (1, LY_SRC)) = 1; M (Y (1, LY_PITCH)) = 0; M (Y (1, LY_FREE)) = 1;
-        M (Y (1, LY_FTYPE)) = 3; M (Y (1, LY_LOWCUT)) = 20; M (Y (1, LY_DRV)) = 0;
+        M (Y (1, LY_FTYPE)) = 9; M (Y (1, LY_LOWCUT)) = 20; M (Y (1, LY_DRV)) = 0;
         eng->reset(); std::vector<float> L, R;
         render (*eng, v, 57, 0.6f, 0.6f, L, R);
         const double a = tone (L, 220, 0.1f, 0.4f), c = tone (L, 1000, 0.1f, 0.4f);

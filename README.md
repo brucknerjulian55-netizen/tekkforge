@@ -2,6 +2,20 @@
 
 Multisynth als VST3 für FL Studio, mit fünf Modi: Melo One-Shot, Stab, Topkick, Kickbass und Full Kick.
 
+## Neu in 0.4
+
+**Oszillatoren:** 36 Wellen in sieben Gruppen (Grundformen, Bass, FM, Harmonisch, Digital, Vokal, Rauschen), jede mit 16 Positionen und bandbegrenzt. Dazu neun Warp-Arten (Sync, Bend, PWM, Spiegel, Fold, Quantize, Asym, Self-FM).
+
+**Bass:** Tonlage Normal, Bass-Lage oder Fest. Bass-Lage legt jede Taste zwischen 40 und 80 Hz. Dazu Tail Pitch, Obertöne 2, 3 und 5, Mono bis, Phase 180, Boost vor dem Drive, zwei Drive-Stufen, zehn Verzerrungsarten und zehn fertige Bass-Charaktere (fünf für den Topkick).
+
+**Filter:** LP 12 und 24, HP 12 und 24, Bandpass, Notch, Comb + und -, Formant.
+
+**EQ:** Eigene Seite, je ein EQ für Master und jede Ebene mit acht Bändern. Acht Formen, Flanken 12 bis 48 dB, Stereo, Mid, Side, Links, Rechts und Dynamik pro Band. Punkte ziehen, Mausrad für Q, Doppelklick zum Anlegen und Löschen, Rechtsklick für die Form.
+
+**Effekte neu:** OTT, Transient, Waveshaper, Stereo, Freq Shift, Ring Mod, Rumble, Tape, Gate.
+
+**Oberfläche:** Die Synth-Seite zeigt oben drei Ebenen und darunter alle Werkzeuge der gewählten Ebene. Alte Presets werden beim Laden umgerechnet.
+
 ## Bauen
 
 **Auf dem eigenen PC**

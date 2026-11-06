@@ -241,6 +241,82 @@ private:
     Ed& d; PRef ref; int columns, last = -1; juce::StringArray items;
 };
 
+/** Auswahl mit vielen Eintraegen: Klick oeffnet die Liste, Pfeile und Mausrad schalten durch. */
+class ChoiceBtn : public Ticking
+{
+public:
+    ChoiceBtn (Ed& ed, int index, std::function<String (int)> groupOf = {}) : d (ed), ref { ed.p.param (index) }, group (std::move (groupOf))
+    {
+        items = dynamic_cast<juce::AudioParameterChoice*> (ref.p)->choices;
+    }
+    void step (int by) { const int n = juce::jlimit (0, items.size() - 1, (int) ref.real() + by); ref.begin(); ref.setReal ((float) n); ref.end(); repaint(); }
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (theme::well); g.fillRoundedRectangle (r, 4.0f);
+        g.setColour (theme::dim); g.setFont (theme::font (13.0f, true));
+        g.drawText ("<", r.removeFromLeft (16.0f), juce::Justification::centred, false);
+        g.drawText (">", r.removeFromRight (16.0f), juce::Justification::centred, false);
+        g.setColour (d.acc); g.setFont (theme::font (12.5f, true));
+        g.drawFittedText (items[(int) ref.real()], r.toNearestInt(), juce::Justification::centred, 1, 0.75f);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.x < 17) { step (-1); return; }
+        if (e.x > getWidth() - 17) { step (1); return; }
+        const int cur = (int) ref.real();
+        juce::PopupMenu menu;
+        if (group)
+        {
+            String open; juce::PopupMenu sub;
+            for (int i = 0; i < items.size(); ++i)
+            {
+                if (group (i) != open) { if (open.isNotEmpty()) menu.addSubMenu (open, sub); sub = {}; open = group (i); }
+                sub.addItem (i + 1, items[i], true, i == cur);
+            }
+            menu.addSubMenu (open, sub);
+        }
+        else for (int i = 0; i < items.size(); ++i) menu.addItem (i + 1, items[i], true, i == cur);
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                            [sp = SafePointer<ChoiceBtn> (this)] (int r) { if (sp != nullptr && r > 0) { sp->ref.begin(); sp->ref.setReal ((float) (r - 1)); sp->ref.end(); sp->repaint(); } });
+    }
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) override { if (w.deltaY != 0) step (w.deltaY > 0 ? -1 : 1); }
+    void tick() override { const int v = (int) ref.real(); if (v != last) { last = v; repaint(); } }
+private:
+    Ed& d; PRef ref; std::function<String (int)> group; juce::StringArray items; int last = -1;
+};
+
+/** Laedt einen fertigen Charakter in die Ebene. */
+class PatchBtn : public Ticking
+{
+public:
+    PatchBtn (Ed& ed, int layerIndex) : d (ed), l (layerIndex) {}
+    const std::vector<Patch>& list() const { return d.mode == KICK && l == 0 ? topPatches() : bassPatches(); }
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (d.acc); g.fillRoundedRectangle (r, 4.0f);
+        g.setColour (theme::well); g.setFont (theme::font (12.5f, true));
+        g.drawFittedText (U ("Charakter laden"), r.toNearestInt(), juce::Justification::centred, 1, 0.75f);
+    }
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        juce::PopupMenu menu; const auto& p = list();
+        for (int i = 0; i < (int) p.size(); ++i) menu.addItem (i + 1, U (p[(size_t) i].name));
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [sp = SafePointer<PatchBtn> (this)] (int r)
+        {
+            if (sp == nullptr || r <= 0) return;
+            for (const auto& e : patchValues (sp->list()[(size_t) r - 1]))
+            {
+                PRef x { sp->d.p.param (modeParam (sp->d.mode, Y (sp->l, e.first))) };
+                x.begin(); x.setReal (e.second); x.end();
+            }
+        });
+    }
+private:
+    Ed& d; int l;
+};
+
 /** Anzeigefenster: wiederholt nur, wenn sich ein beobachteter Wert geaendert hat. */
 class Disp : public Ticking
 {
@@ -304,7 +380,8 @@ class WaveDisp : public XYDisp
 {
 public:
     WaveDisp (Ed& ed, int layerIndex) : XYDisp (ed, { modeParam (ed.mode, Y (layerIndex, LY_WAVE)), modeParam (ed.mode, Y (layerIndex, LY_UNI)), modeParam (ed.mode, Y (layerIndex, LY_DETUNE)),
-                                                      modeParam (ed.mode, Y (layerIndex, LY_SRC)) }, Y (layerIndex, LY_WAVE), -1), layer (layerIndex) {}
+                                                      modeParam (ed.mode, Y (layerIndex, LY_SRC)), modeParam (ed.mode, Y (layerIndex, LY_TABLE)), modeParam (ed.mode, Y (layerIndex, LY_WARP)),
+                                                      modeParam (ed.mode, Y (layerIndex, LY_WARPAMT)) }, Y (layerIndex, LY_WAVE), Y (layerIndex, LY_WARPAMT)), layer (layerIndex) {}
     const SampleData* sample() const { return d.p.samples[sampleSlot (d.mode, layer)].load(); }
     bool isSample() const { return val (Y (layer, LY_SRC)) > 0.5f; }
     void draw (Graphics& g, Rectangle<float> b) override
@@ -331,12 +408,15 @@ public:
             g.drawText (U (s->name), b.removeFromTop (13.0f), juce::Justification::centredLeft, true);
             return;
         }
-        const float w = val (Y (layer, LY_WAVE)); Path p; const int N = 200;
-        juce::Random r (5);
+        const float pos = val (Y (layer, LY_WAVE)), amt = val (Y (layer, LY_WARPAMT)); Path p; const int N = 300;
+        const int table = (int) val (Y (layer, LY_TABLE)), warp = (int) val (Y (layer, LY_WARP));
+        const auto& bank = WavetableBank::get();
+        juce::Random r (5); float last = 0;
         for (int i = 0; i <= N; ++i)
         {
-            const float ph = std::fmod ((float) i / (float) N * 2.0f, 1.0f);
-            const float y = b.getCentreY() - morphOsc (ph, 0.001f, w, r.nextFloat() * 2.0f - 1.0f) * b.getHeight() * 0.42f;
+            const float ph = std::fmod ((float) i / (float) N * 2.0f, 1.0f), rp = warpPhase (ph, warp, amt, last);
+            last = table == WT_NOISE_INDEX ? r.nextFloat() * 2.0f - 1.0f : bank.ready (table) ? bank.shape (table, pos, rp) : std::sin (6.2831853f * rp);
+            const float y = b.getCentreY() - last * b.getHeight() * 0.42f;
             const float x = b.getX() + b.getWidth() * (float) i / (float) N;
             if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
         }
@@ -436,10 +516,27 @@ public:
     {
         const auto curve = [&] (float fc)
         {
-            Path p; const int type = (int) val (Y (layer, LY_FTYPE));
-            for (int i = 0; i <= 120; ++i)
+            Path p; const int type = (int) val (Y (layer, LY_FTYPE)); const float res = val (Y (layer, LY_RES));
+            const auto mag = [&] (float hz)
             {
-                const float x = (float) i / 120.0f, db = type == 3 ? 0.0f : 20.0f * std::log10 (svfMag (type, xHz (x), fc, val (Y (layer, LY_RES))) + 1e-4f);
+                switch (type)
+                {
+                    case 0: return svfMag (0, hz, fc, res);
+                    case 1: return std::pow (svfMag (0, hz, fc, res), 2.0f);
+                    case 2: return svfMag (1, hz, fc, res);
+                    case 3: return std::pow (svfMag (1, hz, fc, res), 2.0f);
+                    case 4: return svfMag (2, hz, fc, res);
+                    case 5: return svfMag (3, hz, fc, res);
+                    case 6: return 0.08f + std::fabs (std::cos (3.14159265f * hz / fc));
+                    case 7: return 0.08f + std::fabs (std::sin (3.14159265f * hz / fc));
+                    case 8: { float m = 0; for (int k = 0; k < 3; ++k) m = juce::jmax (m, svfMag (2, hz, formantHz (fc, k), 0.7f + res * 0.28f) * (k == 0 ? 1.0f : 0.7f)); return m; }
+                    default: return 1.0f;
+                }
+            };
+            const int steps = type == 6 || type == 7 ? 400 : 120;
+            for (int i = 0; i <= steps; ++i)
+            {
+                const float x = (float) i / (float) steps, db = 20.0f * std::log10 (mag (xHz (x)) + 1e-4f);
                 const float y = b.getY() + b.getHeight() * (0.3f - db / 60.0f);
                 if (i == 0) p.startNewSubPath (b.getX() + x * b.getWidth(), y); else p.lineTo (b.getX() + x * b.getWidth(), juce::jlimit (b.getY(), b.getBottom() + 2, y));
             }
@@ -460,16 +557,17 @@ private:
 class DriveDisp : public XYDisp
 {
 public:
-    DriveDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_DRV)), modeParam (ed.mode, Y (l, LY_DRVTYPE)) }, -1, Y (l, LY_DRV)), layer (l) {}
+    DriveDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_DRV)), modeParam (ed.mode, Y (l, LY_DRVTYPE)), modeParam (ed.mode, Y (l, LY_DRV2)), modeParam (ed.mode, Y (l, LY_DRV2TYPE)) }, -1, Y (l, LY_DRV)), layer (l) {}
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float gain = std::pow (10.0f, val (Y (layer, LY_DRV)) * 2.0f); const int t = (int) val (Y (layer, LY_DRVTYPE));
+        const float gain = std::pow (10.0f, val (Y (layer, LY_DRV)) * 2.0f); const int t = (int) val (Y (layer, LY_DRVTYPE)), t2 = (int) val (Y (layer, LY_DRV2TYPE));
+        const float g2 = val (Y (layer, LY_DRV2)), gain2 = std::pow (10.0f, g2 * 1.8f);
         g.setColour (theme::line); g.drawHorizontalLine ((int) b.getCentreY(), b.getX(), b.getRight());
         g.drawVerticalLine ((int) b.getCentreX(), b.getY(), b.getBottom());
         Path p;
         for (int i = 0; i <= 200; ++i)
         {
-            const float x = (float) i / 200.0f * 2 - 1, y = shape (x * gain, t);
+            const float x = (float) i / 200.0f * 2 - 1, y0 = shape (x * gain, t), y = g2 > 0.0001f ? shape (y0 * gain2, t2) : y0;
             const float px = b.getCentreX() + x * b.getWidth() * 0.5f, py = b.getCentreY() - y * b.getHeight() * 0.46f;
             if (i == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
         }
@@ -769,12 +867,14 @@ public:
     }
     template <class T> T* own (std::unique_ptr<T> c) { auto* r = c.get(); addAndMakeVisible (r); keep.push_back (std::move (c)); return r; }
     Knob* knob (int mp, const char* name) { auto* k = own (std::make_unique<Knob> (d, modeParam (d.mode, mp), U (name))); knobs.push_back (k); return k; }
+    void tick() override { Ticking::tick(); tickChoices(); }
     Knob* knobAbs (int index, const char* name) { auto* k = own (std::make_unique<Knob> (d, index, U (name))); knobs.push_back (k); return k; }
     void resized() override
     {
         auto b = getLocalBounds().reduced (8, 6);
         auto head = b.removeFromTop (22);
         if (headStrip != nullptr) headStrip->setBounds (head.removeFromRight (headWidth).reduced (0, 1));
+        for (auto& h : headItems) { h.first->setBounds (head.removeFromRight (h.second).reduced (1, 1)); }
         b.removeFromTop (3);
         if (! knobs.empty())
         {
@@ -785,8 +885,14 @@ public:
         if (fill != nullptr) fill->setBounds (b.reduced (0, 2));
     }
     juce::Component* fill = nullptr; Strip* headStrip = nullptr; int headWidth = 120, oscIndex = -1;
+    std::vector<std::pair<juce::Component*, int>> headItems;
+    ChoiceBtn* choice (int mp, int width, std::function<String (int)> grp = {})
+    {
+        auto* c = own (std::make_unique<ChoiceBtn> (d, modeParam (d.mode, mp), std::move (grp))); headItems.push_back ({ c, width }); choices.push_back (c); return c;
+    }
+    void tickChoices() { for (auto* c : choices) c->tick(); }
 private:
-    Ed& d; String title; std::vector<std::unique_ptr<juce::Component>> keep; std::vector<Knob*> knobs;
+    Ed& d; String title; std::vector<std::unique_ptr<juce::Component>> keep; std::vector<Knob*> knobs; std::vector<ChoiceBtn*> choices;
 };
 
 class CurveEdit : public Ticking
@@ -1017,81 +1123,150 @@ private:
     Ed& d; PRef ref; String text; Colour onColour; float last = -1;
 };
 
-class LayerRow : public Ticking
+/** Eine Ebene in der Mischleiste: Klick waehlt sie zum Bearbeiten aus. */
+class LayerStrip : public Ticking
 {
 public:
-    LayerRow (Ed& ed, int layerIndex) : d (ed), l (layerIndex),
+    LayerStrip (Ed& ed, int layerIndex) : d (ed), l (layerIndex),
         mute (ed, modeParam (ed.mode, Y (l, LY_MUTE)), "M", theme::hot), solo (ed, modeParam (ed.mode, Y (l, LY_SOLO)), "S", ed.acc),
         level (ed, modeParam (ed.mode, Y (l, LY_LVL)), U ("Pegel"))
     {
         addAndMakeVisible (mute); addAndMakeVisible (solo); addAndMakeVisible (level);
+        fxBtn.setButtonText ("FX");
+        fxBtn.setColour (juce::TextButton::buttonColourId, theme::well); fxBtn.setColour (juce::TextButton::textColourOffId, theme::ink);
+        fxBtn.setColour (juce::ComboBox::outlineColourId, theme::line);
+        fxBtn.onClick = [this] { d.e.fxScope = l + 1; d.e.selectedSlot = layerSlot (l, 0); d.e.showPage (2); };
+        eqBtn.setButtonText ("EQ");
+        eqBtn.setColour (juce::TextButton::buttonColourId, theme::well); eqBtn.setColour (juce::TextButton::textColourOffId, theme::ink);
+        eqBtn.setColour (juce::ComboBox::outlineColourId, theme::line);
+        eqBtn.onClick = [this] { d.e.eqScope = l + 1; d.e.showPage (6); };
+        addAndMakeVisible (fxBtn); addAndMakeVisible (eqBtn);
+    }
+    bool selected() const { return d.e.layerTab == l; }
+    void paint (Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour (selected() ? d.acc.withAlpha (0.22f) : theme::plateHi.withAlpha (0.5f)); g.fillRoundedRectangle (b, 8.0f);
+        if (selected()) { g.setColour (d.acc); g.drawRoundedRectangle (b.reduced (1.0f), 8.0f, 2.0f); }
+        const auto v = [&] (int p) { return d.p.rawValue (modeParam (d.mode, Y (l, p))); };
+        g.setColour (theme::ink); g.setFont (theme::font (16.0f, true));
+        g.drawText (U (layerName (d.mode, l)), 12, 8, 150, 22, juce::Justification::centredLeft, false);
+        const auto* smp = d.p.samples[sampleSlot (d.mode, l)].load();
+        const String what = v (LY_SRC) > 0.5f ? (smp != nullptr ? U (smp->name) : U ("Sample fehlt")) : U (waveInfos()[juce::jlimit (0, NUM_TABLES - 1, (int) v (LY_TABLE))].name);
+        g.setColour (theme::dim); g.setFont (theme::font (12.5f));
+        g.drawText (what, 12, 32, 170, 18, juce::Justification::centredLeft, true);
+    }
+    void resized() override
+    {
+        auto b = getLocalBounds().reduced (6);
+        level.setBounds (b.removeFromRight (70)); b.removeFromRight (4);
+        auto r = b.removeFromRight (150).withSizeKeepingCentre (150, 26);
+        mute.setBounds (r.removeFromLeft (30)); r.removeFromLeft (2); solo.setBounds (r.removeFromLeft (30)); r.removeFromLeft (4);
+        fxBtn.setBounds (r.removeFromLeft (40)); r.removeFromLeft (2); eqBtn.setBounds (r);
+    }
+    void mouseDown (const juce::MouseEvent&) override { if (! selected()) { d.e.layerTab = l; d.e.requestRebuild(); } }
+    void tick() override { mute.tick(); solo.tick(); level.tick(); repaintIfChanged(); }
+    void repaintIfChanged()
+    {
+        const int t = (int) d.p.rawValue (modeParam (d.mode, Y (l, LY_TABLE))) * 2 + (int) d.p.rawValue (modeParam (d.mode, Y (l, LY_SRC)));
+        if (t != shown) { shown = t; repaint(); }
+    }
+private:
+    Ed& d; int l, shown = -1; ToggleBtn mute, solo; Knob level; juce::TextButton fxBtn, eqBtn;
+};
+
+/** Alle Werkzeuge der gewaehlten Ebene auf einmal: Quelle bis Ausgang in Signalrichtung. */
+class LayerEditor : public Ticking
+{
+public:
+    LayerEditor (Ed& ed, int layerIndex) : d (ed), l (layerIndex)
+    {
         const auto add = [&] (const char* t) { panels.push_back (std::make_unique<Panel> (d, U (t))); addAndMakeVisible (*panels.back()); return panels.back().get(); };
         const auto strip = [&] (Panel* p, int param, int w) { p->headStrip = p->own (std::make_unique<Strip> (d, modeParam (d.mode, Y (l, param)))); p->headWidth = w; };
 
         auto* src = add ("Quelle"); src->oscIndex = l; src->fill = src->own (std::make_unique<WaveDisp> (d, l)); strip (src, LY_SRC, 130);
-        waveKnobs[0] = src->knob (Y (l, LY_WAVE), "Welle"); src->knob (Y (l, LY_TUNE), "Tune"); src->knob (Y (l, LY_FINE), "Fein");
-        waveKnobs[1] = src->knob (Y (l, LY_UNI), "Stimmen"); waveKnobs[2] = src->knob (Y (l, LY_DETUNE), "Verst."); waveKnobs[3] = src->knob (Y (l, LY_WIDTH), "Breite");
+        src->choice (Y (l, LY_WARP), 120);
+        src->choice (Y (l, LY_TABLE), 160, [] (int i) { return U (waveInfos()[i].group); });
+        waveKnobs[0] = src->knob (Y (l, LY_WAVE), "Position"); waveKnobs[1] = src->knob (Y (l, LY_WARPAMT), "Warp");
+        src->knob (Y (l, LY_TUNE), "Tune"); src->knob (Y (l, LY_FINE), "Fein");
+        waveKnobs[2] = src->knob (Y (l, LY_UNI), "Stimmen"); waveKnobs[3] = src->knob (Y (l, LY_DETUNE), "Verst."); waveKnobs[4] = src->knob (Y (l, LY_WIDTH), "Breite");
 
         auto* amp = add ("Hüllkurve"); amp->fill = amp->own (std::make_unique<AmpDisp> (d, l)); strip (amp, LY_HOLD, 150);
         amp->knob (Y (l, LY_LEN), "Länge"); amp->knob (Y (l, LY_ATT), "Attack"); amp->knob (Y (l, LY_CURVE), "Kurve");
         susKnob = amp->knob (Y (l, LY_SUS), "Sustain"); amp->knob (Y (l, LY_REL), "Release");
 
         auto* pit = add ("Pitch"); pit->fill = pit->own (std::make_unique<PitchDisp> (d, l));
-        pit->knob (Y (l, LY_PAMT), "Menge"); pit->knob (Y (l, LY_PTIME), "Zeit"); pit->knob (Y (l, LY_PCURVE), "Kurve");
+        pit->knob (Y (l, LY_PAMT), "Menge"); pit->knob (Y (l, LY_PTIME), "Zeit"); pit->knob (Y (l, LY_PCURVE), "Kurve"); pit->knob (Y (l, LY_GLIDE), "Tail Pitch");
 
-        auto* fil = add ("Filter"); fil->fill = fil->own (std::make_unique<FilterDisp> (d, l)); strip (fil, LY_FTYPE, 120);
+        auto* fil = add ("Filter"); fil->fill = fil->own (std::make_unique<FilterDisp> (d, l)); fil->choice (Y (l, LY_FTYPE), 110);
         filterKnobs[0] = fil->knob (Y (l, LY_CUT), "Cutoff"); filterKnobs[1] = fil->knob (Y (l, LY_RES), "Reso");
         filterKnobs[2] = fil->knob (Y (l, LY_FAMT), "Env"); filterKnobs[3] = fil->knob (Y (l, LY_FDEC), "Zeit");
 
-        auto* drv = add ("Drive"); drv->fill = drv->own (std::make_unique<DriveDisp> (d, l)); strip (drv, LY_DRVTYPE, 96);
-        drv->knob (Y (l, LY_DRV), "Drive"); toneKnob = drv->knob (Y (l, LY_DRVTONE), "Ton");
+        auto* drv = add ("Drive"); drv->fill = drv->own (std::make_unique<DriveDisp> (d, l));
+        drv->choice (Y (l, LY_DRV2TYPE), 96); drv->choice (Y (l, LY_DRVTYPE), 96);
+        drv->knob (Y (l, LY_PREAMT), "Boost"); boostKnob = drv->knob (Y (l, LY_PREF), "Boost Hz");
+        drv->knob (Y (l, LY_DRV), "Stufe 1"); toneKnob = drv->knob (Y (l, LY_DRVTONE), "Ton"); drv->knob (Y (l, LY_DRV2), "Stufe 2");
 
-        auto* mix = add ("Mix"); strip (mix, LY_SUBOCT, 66);
-        mix->knob (Y (l, LY_SUB), "Sub"); mix->knob (Y (l, LY_LOWCUT), "Lowcut"); mix->knob (Y (l, LY_PAN), "Pan");
+        auto* bas = add ("Bass"); strip (bas, LY_SUBOCT, 66);
+        bas->headItems.push_back ({ bas->own (std::make_unique<PatchBtn> (d, l)), 112 });
+        bas->choice (Y (l, LY_KEY), 100);
+        bas->fill = bas->own (std::make_unique<KeyHint> (d, l));
+        bas->knob (Y (l, LY_SUB), "Sub"); bas->knob (Y (l, LY_H2), "Oberton 2"); bas->knob (Y (l, LY_H3), "Oberton 3"); bas->knob (Y (l, LY_H5), "Oberton 5");
+        bas->knob (Y (l, LY_MONO), "Mono bis");
 
-        fxBtn.setButtonText ("FX");
-        fxBtn.setColour (juce::TextButton::buttonColourId, theme::well); fxBtn.setColour (juce::TextButton::textColourOffId, theme::ink);
-        fxBtn.setColour (juce::ComboBox::outlineColourId, theme::line);
-        fxBtn.onClick = [this] { d.e.fxScope = l + 1; d.e.selectedSlot = layerSlot (l, 0); d.e.showPage (2); };
-        addAndMakeVisible (fxBtn);
+        auto* mix = add ("Ausgang"); mix->headStrip = mix->own (std::make_unique<Strip> (d, modeParam (d.mode, Y (l, LY_PHASE)))); mix->headWidth = 100;
+        mix->knob (Y (l, LY_LOWCUT), "Lowcut"); mix->knob (Y (l, LY_PAN), "Pan");
     }
-    void paint (Graphics& g) override
+    /** Zeigt, welche Frequenz die letzte Taste auf dieser Ebene wirklich spielt. */
+    struct KeyHint : public Ticking
     {
-        g.setColour (theme::ink); g.setFont (theme::font (15.0f, true));
-        g.drawText (U (layerName (d.mode, l)), 2, 4, 90, 20, juce::Justification::centredLeft, false);
-    }
+        KeyHint (Ed& ed, int layerIndex) : d (ed), l (layerIndex) {}
+        void paint (Graphics& g) override
+        {
+            auto b = getLocalBounds().toFloat();
+            g.setColour (theme::well); g.fillRoundedRectangle (b, 6.0f);
+            const int key = (int) d.p.rawValue (modeParam (d.mode, Y (l, LY_KEY)));
+            const int n = d.p.lastNote.load();
+            float hz = 440.0f * std::pow (2.0f, ((float) (n >= 0 ? n : 60) - 69.0f) / 12.0f);
+            if (key == 1) { while (hz >= 80.0f) hz *= 0.5f; while (hz < 40.0f) hz *= 2.0f; }
+            if (key == 2) hz = 440.0f * std::pow (2.0f, (d.p.rawValue (modeParam (d.mode, Y (l, LY_ROOT))) - 69.0f) / 12.0f);
+            const char* t = key == 1 ? "Bass-Lage: Jede Taste landet zwischen 40 und 80 Hz" : key == 2 ? "Fest: Spielt immer dieselbe Tonhöhe" : "Normal: Spielt die echte Tonhöhe der Taste";
+            g.setColour (theme::ink); g.setFont (theme::font (16.0f, true));
+            g.drawText (hzText (hz), b.withTrimmedBottom (b.getHeight() * 0.42f), juce::Justification::centred, false);
+            g.setColour (theme::dim); g.setFont (theme::font (12.5f));
+            g.drawFittedText (U (t), b.withTrimmedTop (b.getHeight() * 0.58f).toNearestInt().reduced (6, 0), juce::Justification::centred, 2, 0.8f);
+        }
+        void tick() override { repaint(); }
+        Ed& d; int l;
+    };
     void resized() override
     {
         auto b = getLocalBounds();
-        auto head = b.removeFromLeft (90);
-        head.removeFromTop (26);
-        auto r = head.removeFromTop (26); mute.setBounds (r.removeFromLeft (28)); r.removeFromLeft (2); solo.setBounds (r.removeFromLeft (28)); r.removeFromLeft (2); fxBtn.setBounds (r.withTrimmedRight (2));
-        level.setBounds (head);
-        static const int widths[] = { 300, 240, 150, 196, 136, 0 };
-        for (size_t i = 0; i < panels.size(); ++i)
-        {
-            if (i + 1 == panels.size()) { panels[i]->setBounds (b); break; }
-            panels[i]->setBounds (b.removeFromLeft (widths[i]).withTrimmedRight (3));
-        }
+        auto row1 = b.removeFromTop (b.getHeight() / 2); b.removeFromTop (4); row1.removeFromBottom (0);
+        const auto place = [] (Panel& p, juce::Rectangle<int>& r, int w) { p.setBounds (w > 0 ? r.removeFromLeft (w).withTrimmedRight (4) : r); };
+        place (*panels[0], row1, 560); place (*panels[1], row1, 380); place (*panels[2], row1, 0);
+        place (*panels[3], b, 300); place (*panels[4], b, 390); place (*panels[5], b, 400); place (*panels[6], b, 0);
     }
     void tick() override
     {
-        mute.tick(); solo.tick(); level.tick();
         for (auto& p : panels) p->tick();
+        for (auto& p : panels) for (auto* c : p->getChildren()) if (auto* k = dynamic_cast<KeyHint*> (c)) k->tick();
         const auto v = [&] (int p) { return d.p.rawValue (modeParam (d.mode, Y (l, p))); };
         const bool off = v (LY_MUTE) > 0.5f;
         for (auto& p : panels) p->setAlpha (off ? 0.45f : 1.0f);
         const bool sample = v (LY_SRC) > 0.5f;
         for (auto* k : waveKnobs) k->setAlpha (sample ? 0.3f : 1.0f);
-        const bool fOff = (int) v (LY_FTYPE) == 3;
+        waveKnobs[1]->setAlpha (sample || (int) v (LY_WARP) == 0 ? 0.3f : 1.0f);
+        const bool fOff = (int) v (LY_FTYPE) == 9;
         for (auto* k : filterKnobs) k->setAlpha (fOff ? 0.3f : 1.0f);
         toneKnob->setAlpha (v (LY_DRV) <= 0.0f ? 0.3f : 1.0f);
+        boostKnob->setAlpha (v (LY_PREAMT) <= 0.0f ? 0.3f : 1.0f);
         susKnob->setAlpha (v (LY_HOLD) > 0.5f ? 1.0f : 0.3f);
     }
 private:
-    Ed& d; int l; ToggleBtn mute, solo; Knob level; juce::TextButton fxBtn;
+    Ed& d; int l;
     std::vector<std::unique_ptr<Panel>> panels;
-    Knob* waveKnobs[4] {}; Knob* filterKnobs[4] {}; Knob* toneKnob = nullptr; Knob* susKnob = nullptr;
+    Knob* waveKnobs[5] {}; Knob* filterKnobs[4] {}; Knob* toneKnob = nullptr; Knob* susKnob = nullptr; Knob* boostKnob = nullptr;
 };
 
 // ---------------- Seite: Synth ---------------------------------------------
@@ -1101,7 +1276,8 @@ public:
     SynthPage (Ed& ed, std::function<int (std::vector<float>&, std::vector<float>&, float&)> src, std::function<void (std::vector<float>&)> spec)
         : d (ed), wave (d, src), spectrum (d, spec), env (d), lfo (d)
     {
-        for (int l = 0; l < NUM_LAYERS; ++l) { rows.push_back (std::make_unique<LayerRow> (d, l)); addAndMakeVisible (*rows.back()); }
+        for (int l = 0; l < NUM_LAYERS; ++l) { rows.push_back (std::make_unique<LayerStrip> (d, l)); addAndMakeVisible (*rows.back()); }
+        layer = std::make_unique<LayerEditor> (d, juce::jlimit (0, NUM_LAYERS - 1, d.e.layerTab)); addAndMakeVisible (*layer);
         addAndMakeVisible (env); addAndMakeVisible (lfo); addAndMakeVisible (spectrum);
         if (modeIsMono (d.mode)) addAndMakeVisible (wave);
         else { chord = std::make_unique<ChordBox> (d); addAndMakeVisible (*chord); }
@@ -1117,8 +1293,10 @@ public:
     {
         auto b = getLocalBounds();
         auto bottom = b.removeFromBottom (268); b.removeFromBottom (6);
-        const int h = (b.getHeight() - 8) / NUM_LAYERS;
-        for (auto& r : rows) { r->setBounds (b.removeFromTop (h)); b.removeFromTop (4); }
+        auto mix = b.removeFromTop (70); b.removeFromTop (4);
+        const int w = mix.getWidth() / NUM_LAYERS;
+        for (auto& r : rows) r->setBounds (mix.removeFromLeft (w).withTrimmedRight (4));
+        layer->setBounds (b);
         env.setBounds (bottom.removeFromLeft (380)); bottom.removeFromLeft (6);
         lfo.setBounds (bottom.removeFromLeft (500)); bottom.removeFromLeft (6);
         auto top = bottom.removeFromTop (bottom.getHeight() / 2 - 3); bottom.removeFromTop (6);
@@ -1128,12 +1306,12 @@ public:
     void tick() override
     {
         for (auto& r : rows) r->tick();
-        env.tick(); lfo.tick(); spectrum.tick();
+        layer->tick(); env.tick(); lfo.tick(); spectrum.tick();
         if (chord != nullptr) chord->tick(); else wave.tick();
     }
 private:
     Ed& d; WaveShapeView wave; Spectrum spectrum; EnvPanel env; LfoPanel lfo;
-    std::vector<std::unique_ptr<LayerRow>> rows; std::unique_ptr<ChordBox> chord;
+    std::vector<std::unique_ptr<LayerStrip>> rows; std::unique_ptr<LayerEditor> layer; std::unique_ptr<ChordBox> chord;
 };
 
 // ---------------- Seite: FX ------------------------------------------------
@@ -1236,7 +1414,9 @@ public:
             case FX_COMP:       { curve ([&] (float x) { const float in = -60.0f * (1 - x), ov = in - v (0), o2 = ov > 0 ? v (0) + ov / v (1) : in; return 1.0f + o2 / 60.0f; }); break; }
             default:
                 g.setColour (theme::dim); g.setFont (theme::font (16.0f));
-                g.drawText (U ("Wähle oben einen Effekt für diesen Slot."), b, juce::Justification::centred, false); return;
+                if (type() == FX_OFF) g.drawText (U ("Wähle oben einen Effekt für diesen Slot."), b, juce::Justification::centred, false);
+                else g.drawFittedText (U (fxHint (type())), b.toNearestInt().reduced (20), juce::Justification::centred, 3, 0.9f);
+                return;
         }
         if (! p.isEmpty()) { g.setColour (d.acc); g.strokePath (p, juce::PathStrokeType (2.2f, juce::PathStrokeType::curved)); }
         for (int i = 0; i < handles(); ++i)
@@ -1302,10 +1482,10 @@ public:
     void paint (Graphics& g) override
     {
         const int cur = (int) d.p.rawValue (slotParam (slot, S_TYPE));
-        const float w = (float) getWidth() / 7.0f, h = (float) getHeight() / 2.0f;
+        const float w = (float) getWidth() / 8.0f, h = (float) getHeight() / 3.0f;
         for (int i = 0; i < FX_TYPES; ++i)
         {
-            Rectangle<float> r ((float) (i % 7) * w, (float) (i / 7) * h, w, h); r.reduce (2, 2);
+            Rectangle<float> r ((float) (i % 8) * w, (float) (i / 8) * h, w, h); r.reduce (2, 2);
             g.setColour (i == cur ? d.acc : theme::well); g.fillRoundedRectangle (r, 5.0f);
             g.setColour (i == cur ? theme::well : theme::ink); g.setFont (theme::font (13.5f, i == cur));
             g.drawText (U (fxNames()[(size_t) i]), r, juce::Justification::centred, false);
@@ -1313,7 +1493,7 @@ public:
     }
     void mouseDown (const juce::MouseEvent& e) override
     {
-        const int i = juce::jlimit (0, FX_TYPES - 1, e.y * 2 / getHeight() * 7 + e.x * 7 / getWidth());
+        const int i = juce::jlimit (0, FX_TYPES - 1, e.y * 3 / getHeight() * 8 + e.x * 8 / getWidth());
         PRef t { d.p.param (slotParam (slot, S_TYPE)) }; t.begin(); t.setReal ((float) i); t.end();
         const FxP* info = fxInfo (i);
         for (int k = 0; k < FX_PARAMS; ++k) { PRef r { d.p.param (slotParam (slot, S_P1 + k)) }; r.begin(); r.setReal (fxNorm (info[k], info[k].def)); r.end(); }
@@ -1392,7 +1572,7 @@ public:
         left.removeFromTop (6);
         const int h = juce::jmin (84, left.getHeight() / NUM_MASTER_SLOTS);
         for (auto& r : rows) r->setBounds (left.removeFromTop (h).reduced (0, 3));
-        grid->setBounds (b.removeFromTop (96)); b.removeFromTop (8);
+        grid->setBounds (b.removeFromTop (126)); b.removeFromTop (8);
         auto row = b.removeFromBottom (92);
         if (! knobs.empty()) { const int w = row.getWidth() / 7; for (auto& k : knobs) k->setBounds (row.removeFromLeft (w)); }
         b.removeFromBottom (6);
@@ -1406,6 +1586,270 @@ private:
     std::vector<std::unique_ptr<juce::TextButton>> scopeTabs;
     std::vector<std::unique_ptr<Knob>> knobs;
     std::unique_ptr<FxTypeGrid> grid; std::unique_ptr<Spectrum> analyzer; std::unique_ptr<FxVisual> visual;
+};
+
+// ---------------- Seite: EQ ------------------------------------------------
+static const char* const eqKindNames[8] = { "Glocke", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Notch", "Bandpass", "Tilt" };
+
+/** Kurve und Punkte ueber dem Analyzer. Ziehen: Frequenz und Gain, Mausrad: Q, Doppelklick: Band an oder aus. */
+class EqGraph : public Ticking
+{
+public:
+    EqGraph (Ed& ed, Spectrum& s, int eqIndex) : d (ed), spec (s), eq (eqIndex) { setOpaque (false); }
+    bool hitTest (int x, int y) override { return ! spec.tabs().contains (x, y); }
+    PRef ref (int band, int p) const { return { d.p.param (eqParam (eq, band, p)) }; }
+    void read (int band, float* out) const { for (int k = 0; k < E_COUNT; ++k) out[k] = d.p.rawValue (eqParam (eq, band, k)); }
+    float range() const { return d.e.eqRange == 0 ? 15.0f : 30.0f; }
+    Rectangle<float> area() const { return spec.plot(); }
+    float yOf (float db) const { const auto b = area(); return juce::jlimit (b.getY(), b.getBottom(), b.getCentreY() - db / range() * b.getHeight() * 0.48f); }
+    static bool flat (int kind) { return kind == EQ_LOWCUT || kind == EQ_HIGHCUT || kind == EQ_NOTCH || kind == EQ_BANDPASS; }
+    juce::Point<float> node (int band) const
+    {
+        float q[E_COUNT]; read (band, q); const auto b = area();
+        return { b.getX() + logX (q[E_FREQ]) * b.getWidth(), yOf (flat ((int) q[E_TYPE]) ? 0.0f : q[E_GAIN]) };
+    }
+    int nodeAt (juce::Point<int> p) const
+    {
+        int best = -1; float dist = 14.0f;
+        for (int i = 0; i < EQ_BANDS; ++i)
+        {
+            if (d.p.rawValue (eqParam (eq, i, E_ON)) < 0.5f) continue;
+            const float r = node (i).getDistanceFrom (p.toFloat());
+            if (r < dist) { dist = r; best = i; }
+        }
+        return best;
+    }
+    void paint (Graphics& g) override
+    {
+        const auto b = area(); const float sr = juce::jmax (22050.0f, (float) d.p.currentSampleRate());
+        g.setColour (theme::ink.withAlpha (0.35f)); g.fillRect (b.getX(), yOf (0.0f), b.getWidth(), 1.0f);
+        g.setFont (theme::font (11.5f));
+        for (float db : { -0.66f, -0.33f, 0.33f, 0.66f })
+        {
+            const float v = db * range();
+            g.setColour (theme::line.withAlpha (0.5f)); g.fillRect (b.getX(), yOf (v), b.getWidth(), 1.0f);
+            g.setColour (theme::dim); g.drawText (String ((int) std::round (v)), Rectangle<float> (b.getRight() - 30, yOf (v) - 13, 28, 13), juce::Justification::centredRight, false);
+        }
+        float q[EQ_BANDS][E_COUNT]; for (int i = 0; i < EQ_BANDS; ++i) read (i, q[i]);
+        const auto curve = [&] (int only)
+        {
+            Path p;
+            for (int i = 0; i <= 320; ++i)
+            {
+                const float x = (float) i / 320.0f, hz = xHz (x); float db = 0;
+                for (int k = 0; k < EQ_BANDS; ++k)
+                    if (q[k][E_ON] > 0.5f && (only < 0 || only == k)) db += bandDb (q[k], juce::jmin (hz, sr * 0.49f), sr);
+                const float px = b.getX() + x * b.getWidth();
+                if (i == 0) p.startNewSubPath (px, yOf (db)); else p.lineTo (px, yOf (db));
+            }
+            return p;
+        };
+        const int sel = d.e.eqBand;
+        if (q[sel][E_ON] > 0.5f)
+        {
+            auto p = curve (sel), f = p;
+            f.lineTo (b.getRight(), yOf (0)); f.lineTo (b.getX(), yOf (0)); f.closeSubPath();
+            g.setColour (d.acc.withAlpha (0.18f)); g.fillPath (f);
+            g.setColour (d.acc.withAlpha (0.55f)); g.strokePath (p, juce::PathStrokeType (1.2f));
+        }
+        g.setColour (d.acc); g.strokePath (curve (-1), juce::PathStrokeType (2.4f));
+        for (int i = 0; i < EQ_BANDS; ++i)
+        {
+            if (q[i][E_ON] < 0.5f) continue;
+            const auto c = node (i);
+            if (std::fabs (q[i][E_DYN]) > 0.01f)
+            {   // Dynamik: Strich zeigt, wie weit das Band fahren kann
+                g.setColour (theme::hot); g.fillRect (c.x - 1.5f, juce::jmin (c.y, yOf (q[i][E_GAIN] + q[i][E_DYN])), 3.0f, std::fabs (yOf (q[i][E_GAIN] + q[i][E_DYN]) - c.y));
+            }
+            const bool on = i == sel;
+            g.setColour (on ? d.acc : theme::ink); g.fillEllipse (c.x - 9.0f, c.y - 9.0f, 18.0f, 18.0f);
+            g.setColour (theme::well); g.setFont (theme::font (12.5f, true));
+            g.drawText (String (i + 1), Rectangle<float> (c.x - 9.0f, c.y - 9.0f, 18.0f, 18.0f), juce::Justification::centred, false);
+        }
+        const auto* s = q[sel];
+        if (s[E_ON] > 0.5f)
+        {
+            g.setColour (theme::ink); g.setFont (theme::font (13.0f, true));
+            g.drawText (String (sel + 1) + "  " + U (eqKindNames[(int) s[E_TYPE]]) + "  " + hzText (s[E_FREQ]) + "  " + String (s[E_GAIN], 1) + " dB  Q " + String (s[E_Q], 2),
+                        Rectangle<float> (b.getX() + 8, b.getBottom() - 22, 420, 18), juce::Justification::centredLeft, false);
+        }
+    }
+    void select (int band) { if (band != d.e.eqBand) { d.e.eqBand = band; bandChanged = true; } }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const int n = nodeAt (e.getPosition());
+        spec.clearHover();
+        if (n < 0) return;
+        select (n);
+        if (e.mods.isPopupMenu()) { menu (n); return; }
+        grabbed = n; auto f = ref (n, E_FREQ), a = ref (n, E_GAIN); f.begin(); a.begin();
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (grabbed < 0) return;
+        const auto b = area();
+        ref (grabbed, E_FREQ).setReal (juce::jlimit (20.0f, 20000.0f, xHz (juce::jlimit (0.0f, 1.0f, ((float) e.x - b.getX()) / b.getWidth()))));
+        ref (grabbed, E_GAIN).setReal (juce::jlimit (-30.0f, 30.0f, (b.getCentreY() - (float) e.y) / (b.getHeight() * 0.48f) * range()));
+    }
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (grabbed >= 0) { auto f = ref (grabbed, E_FREQ), a = ref (grabbed, E_GAIN); f.end(); a.end(); grabbed = -1; }
+        if (bandChanged) { bandChanged = false; d.e.requestRebuild(); }
+    }
+    void mouseMove (const juce::MouseEvent& e) override { spec.setHover (e.getPosition()); }
+    void mouseExit (const juce::MouseEvent&) override { spec.clearHover(); }
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        const int n = nodeAt (e.getPosition()), t = n >= 0 ? n : d.e.eqBand;
+        auto q = ref (t, E_Q); q.begin(); q.setReal (juce::jlimit (0.1f, 18.0f, q.real() * std::exp (w.deltaY * 1.2f))); q.end();
+    }
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        const int n = nodeAt (e.getPosition());
+        if (n >= 0) { auto x = ref (n, E_ON); x.begin(); x.setReal (0); x.end(); return; }
+        for (int i = 0; i < EQ_BANDS; ++i)
+            if (d.p.rawValue (eqParam (eq, i, E_ON)) < 0.5f)
+            {
+                const auto b = area(); const float hz = xHz (juce::jlimit (0.0f, 1.0f, ((float) e.x - b.getX()) / b.getWidth()));
+                const auto put = [&] (int p, float v) { auto x = ref (i, p); x.begin(); x.setReal (v); x.end(); };
+                put (E_TYPE, hz < 45.0f ? EQ_LOWCUT : hz > 13000.0f ? EQ_HIGHCUT : EQ_BELL); put (E_FREQ, hz); put (E_GAIN, 0); put (E_Q, 1); put (E_ON, 1);
+                d.e.eqBand = i; d.e.requestRebuild();
+                return;
+            }
+    }
+    void menu (int band)
+    {
+        juce::PopupMenu m;
+        const int kind = (int) ref (band, E_TYPE).real();
+        for (int i = 0; i < 8; ++i) m.addItem (1 + i, U (eqKindNames[i]), true, i == kind);
+        m.addSeparator(); m.addItem (20, U ("Band ausschalten"));
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [sp = SafePointer<EqGraph> (this), band] (int r)
+        {
+            if (sp == nullptr || r <= 0) return;
+            if (r == 20) { auto x = sp->ref (band, E_ON); x.begin(); x.setReal (0); x.end(); }
+            else { auto x = sp->ref (band, E_TYPE); x.begin(); x.setReal ((float) (r - 1)); x.end(); }
+            sp->d.e.requestRebuild();
+        });
+    }
+private:
+    Ed& d; Spectrum& spec; int eq, grabbed = -1; bool bandChanged = false;
+};
+
+/** Acht Baender nebeneinander: Punkt schaltet, Flaeche waehlt. */
+class EqBar : public Ticking
+{
+public:
+    EqBar (Ed& ed, int eqIndex) : d (ed), eq (eqIndex) {}
+    void paint (Graphics& g) override
+    {
+        const float w = (float) getWidth() / (float) EQ_BANDS;
+        for (int i = 0; i < EQ_BANDS; ++i)
+        {
+            Rectangle<float> r ((float) i * w, 0, w, (float) getHeight()); r.reduce (2, 1);
+            const bool sel = i == d.e.eqBand, on = d.p.rawValue (eqParam (eq, i, E_ON)) > 0.5f;
+            g.setColour (sel ? d.acc : theme::well); g.fillRoundedRectangle (r, 5.0f);
+            g.setColour (on ? (sel ? theme::well : d.acc) : theme::line); g.fillEllipse (r.getX() + 8, r.getCentreY() - 6, 12, 12);
+            g.setColour (sel ? theme::well : theme::ink); g.setFont (theme::font (13.0f, sel));
+            g.drawFittedText (String (i + 1) + "  " + U (eqKindNames[(int) d.p.rawValue (eqParam (eq, i, E_TYPE))]), r.toNearestInt().withTrimmedLeft (26), juce::Justification::centredLeft, 1, 0.8f);
+        }
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const int i = juce::jlimit (0, EQ_BANDS - 1, e.x * EQ_BANDS / juce::jmax (1, getWidth()));
+        const int inside = e.x - i * getWidth() / EQ_BANDS;
+        if (inside < 26) { PRef x { d.p.param (eqParam (eq, i, E_ON)) }; x.begin(); x.setReal (x.real() > 0.5f ? 0.0f : 1.0f); x.end(); repaint(); }
+        if (i != d.e.eqBand) { d.e.eqBand = i; d.e.requestRebuild(); }
+    }
+    void tick() override
+    {
+        float sum = 0; for (int i = 0; i < EQ_BANDS; ++i) sum += d.p.rawValue (eqParam (eq, i, E_ON)) * (float) (1 << i) + d.p.rawValue (eqParam (eq, i, E_TYPE)) * 300.0f * (float) (i + 1);
+        if (sum != last) { last = sum; repaint(); }
+    }
+private:
+    Ed& d; int eq; float last = -1;
+};
+
+class EqPage : public Ticking
+{
+public:
+    explicit EqPage (Ed& ed) : d (ed), eq (juce::jlimit (0, NUM_EQS - 1, ed.e.eqScope)), spec (ed, [] (std::vector<float>&) {}), graph (ed, spec, eq), bar (ed, eq),
+        form (ed, eqParam (eq, ed.e.eqBand, E_TYPE), 4), slope (ed, eqParam (eq, ed.e.eqBand, E_SLOPE), 1), stereo (ed, eqParam (eq, ed.e.eqBand, E_STEREO), 1)
+    {
+        const int band = d.e.eqBand;
+        for (int i = 0; i <= NUM_LAYERS; ++i)
+        {
+            auto b = std::make_unique<juce::TextButton> (i == 0 ? String ("Master") : U (layerName (d.mode, i - 1)));
+            b->setColour (juce::TextButton::buttonColourId, i == eq ? d.acc : theme::well);
+            b->setColour (juce::TextButton::textColourOffId, i == eq ? theme::well : theme::ink);
+            b->setColour (juce::ComboBox::outlineColourId, theme::line);
+            b->onClick = [this, i] { d.e.eqScope = i; d.e.requestRebuild(); };
+            addAndMakeVisible (*b); tabs.push_back (std::move (b));
+        }
+        static const char* const names[5] = { "Frequenz", "Gain", "Q", "Dynamik", "Schwelle" };
+        static const int ids[5] = { E_FREQ, E_GAIN, E_Q, E_DYN, E_THR };
+        for (int i = 0; i < 5; ++i) { knobs.push_back (std::make_unique<Knob> (d, eqParam (eq, band, ids[i]), U (names[i]))); addAndMakeVisible (*knobs.back()); }
+        for (auto* c : { (juce::Component*) &spec, (juce::Component*) &graph, (juce::Component*) &bar, (juce::Component*) &form, (juce::Component*) &slope, (juce::Component*) &stereo, (juce::Component*) &rangeBtn, (juce::Component*) &startBtn }) addAndMakeVisible (c);
+        const auto style = [this] (juce::TextButton& b, const char* t)
+        {
+            b.setButtonText (U (t)); b.setColour (juce::TextButton::buttonColourId, theme::well); b.setColour (juce::TextButton::textColourOffId, theme::ink);
+            b.setColour (juce::ComboBox::outlineColourId, theme::line);
+        };
+        style (rangeBtn, d.e.eqRange == 0 ? "Bereich 15 dB" : "Bereich 30 dB"); style (startBtn, "Startpunkt laden");
+        rangeBtn.onClick = [this] { d.e.eqRange = 1 - d.e.eqRange; d.e.requestRebuild(); };
+        startBtn.onClick = [this] { showStarts(); };
+    }
+    struct Band { int kind; float hz, gain, q; int slope, stereo; };
+    void apply (std::initializer_list<Band> bands)
+    {
+        int i = 0;
+        for (int b = 0; b < EQ_BANDS; ++b) { PRef x { d.p.param (eqParam (eq, b, E_ON)) }; x.begin(); x.setReal (0); x.end(); }
+        for (const auto& s : bands)
+        {
+            const auto put = [&] (int p, float v) { PRef x { d.p.param (eqParam (eq, i, p)) }; x.begin(); x.setReal (v); x.end(); };
+            put (E_TYPE, (float) s.kind); put (E_FREQ, s.hz); put (E_GAIN, s.gain); put (E_Q, s.q); put (E_SLOPE, (float) s.slope); put (E_STEREO, (float) s.stereo); put (E_DYN, 0); put (E_ON, 1);
+            ++i;
+        }
+        d.e.eqBand = 0; d.e.requestRebuild();
+    }
+    void showStarts()
+    {
+        juce::PopupMenu m;
+        m.addItem (1, U ("Kick-Bass: Rumpeln weg, Mitten frei")); m.addItem (2, U ("Topkick: Bass raus, Klick betonen"));
+        m.addItem (3, U ("Melo oder Stab: Platz für die Kick")); m.addItem (4, U ("Master: Unten mono, oben Luft"));
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&startBtn), [sp = SafePointer<EqPage> (this)] (int r)
+        {
+            if (sp == nullptr) return;
+            if (r == 1) sp->apply ({ { EQ_LOWCUT, 28, 0, 1, 2, 0 }, { EQ_BELL, 280, -3, 1.2f, 1, 0 }, { EQ_BELL, 900, 2, 1, 1, 0 } });
+            if (r == 2) sp->apply ({ { EQ_LOWCUT, 180, 0, 1, 1, 0 }, { EQ_BELL, 3200, 3, 1, 1, 0 } });
+            if (r == 3) sp->apply ({ { EQ_LOWCUT, 160, 0, 1, 1, 0 }, { EQ_BELL, 350, -2, 1.2f, 1, 0 }, { EQ_HIGHSHELF, 8000, 2, 0.7f, 1, 0 } });
+            if (r == 4) sp->apply ({ { EQ_LOWCUT, 25, 0, 1, 2, 0 }, { EQ_LOWCUT, 140, 0, 1, 1, ES_SIDE }, { EQ_HIGHSHELF, 11000, 1.5f, 0.7f, 1, 0 } });
+        });
+    }
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto t = b.removeFromTop (34);
+        startBtn.setBounds (t.removeFromRight (170)); t.removeFromRight (4); rangeBtn.setBounds (t.removeFromRight (130)); t.removeFromRight (10);
+        for (size_t i = 0; i < tabs.size(); ++i) tabs[i]->setBounds (t.removeFromLeft (150).withTrimmedRight (3));
+        b.removeFromTop (6);
+        auto row = b.removeFromBottom (96); b.removeFromBottom (4);
+        bar.setBounds (b.removeFromBottom (42)); b.removeFromBottom (4);
+        spec.setBounds (b); graph.setBounds (b);
+        form.setBounds (row.removeFromLeft (330).reduced (0, 8)); row.removeFromLeft (6);
+        slope.setBounds (row.removeFromLeft (80)); row.removeFromLeft (6);
+        stereo.setBounds (row.removeFromLeft (80)); row.removeFromLeft (10);
+        const int w = row.getWidth() / (int) knobs.size();
+        for (auto& k : knobs) k->setBounds (row.removeFromLeft (w));
+    }
+    void tick() override
+    {
+        spec.tick(); graph.repaint(); bar.tick(); form.tick(); slope.tick(); stereo.tick();
+        for (auto& k : knobs) k->tick();
+    }
+private:
+    Ed& d; int eq; Spectrum spec; EqGraph graph; EqBar bar; Strip form, slope, stereo;
+    juce::TextButton rangeBtn, startBtn;
+    std::vector<std::unique_ptr<juce::TextButton>> tabs; std::vector<std::unique_ptr<Knob>> knobs;
 };
 
 // ---------------- Seite: Sample --------------------------------------------
@@ -1960,6 +2404,7 @@ private:
 class TopBar : public Ticking
 {
 public:
+    static constexpr int pageOrder[7] = { 0, 1, 2, 6, 3, 4, 5 };
     TopBar (TekkforgeEditor& editor, Ed& ed) : e (editor), d (ed), quality (d, G_QUALITY), master (d, G_MASTER, "Master")
     {
         addAndMakeVisible (quality); addAndMakeVisible (master);
@@ -1986,12 +2431,12 @@ public:
             g.setColour (sel ? theme::well : c); g.setFont (theme::font (14.0f, true));
             g.drawText (U (modeName (m)), r, juce::Justification::centred, false);
         }
-        static const char* pages[] = { "Synth", "Sample", "FX", "Matrix", "Guide", "Presets" };
-        auto pa = pageArea(); const int pw = pa.getWidth() / 6;
-        for (int i = 0; i < 6; ++i)
+        static const char* pages[] = { "Synth", "Sample", "FX", "EQ", "Matrix", "Guide", "Presets" };
+        auto pa = pageArea(); const int pw = pa.getWidth() / 7;
+        for (int i = 0; i < 7; ++i)
         {
             auto r = pa.removeFromLeft (pw).reduced (2, 8).toFloat();
-            const bool sel = i == e.getPage();
+            const bool sel = pageOrder[i] == e.getPage();
             g.setColour (sel ? theme::ink : theme::plateHi); g.fillRoundedRectangle (r, 5.0f);
             g.setColour (sel ? theme::well : theme::ink); g.setFont (theme::font (13.0f, sel));
             g.drawFittedText (pages[i], r.toNearestInt().reduced (1, 0), juce::Justification::centred, 1, 0.8f);
@@ -2008,7 +2453,8 @@ public:
         if (note >= 0)
         {
             const float tune = d.p.rawValue (modeParam (d.mode, M_TUNE)) + d.p.rawValue (modeParam (d.mode, M_FINE)) * 0.01f;
-            const float hz = 440.0f * std::pow (2.0f, ((float) note + tune - 69.0f) / 12.0f);
+            float hz = 440.0f * std::pow (2.0f, ((float) note + tune - 69.0f) / 12.0f);
+            if (d.mode == KICK && (int) d.p.rawValue (modeParam (KICK, Y (1, LY_KEY))) == 1) { while (hz >= 80.0f) hz *= 0.5f; while (hz < 40.0f) hz *= 2.0f; }   // so klingt der Bass wirklich
             g.setColour (theme::ink); g.setFont (theme::font (15.0f, true));
             g.drawText (noteName (note), info.removeFromTop (25), juce::Justification::bottomRight, false);
             g.setColour (theme::dim); g.setFont (theme::font (12.5f));
@@ -2032,7 +2478,7 @@ public:
             PRef r { d.p.param (G_MODE) }; r.begin(); r.setReal ((float) m); r.end();
         }
         else if (pageArea().contains (ev.getPosition()))
-            e.showPage ((ev.x - pageArea().getX()) * 6 / pageArea().getWidth());
+            e.showPage (pageOrder[juce::jlimit (0, 6, (ev.x - pageArea().getX()) * 7 / pageArea().getWidth())]);
         else if (auditionArea().contains (ev.getPosition())) { e.auditionOn = ! e.auditionOn; repaint(); }
     }
     void tick() override
@@ -2110,6 +2556,7 @@ void TekkforgeEditor::rebuild()
         case 3:  page = std::make_unique<ModPage> (d); break;
         case 4:  page = std::make_unique<GuidePage> (d, specSrc); break;
         case 5:  page = std::make_unique<PresetsPage> (d); break;
+        case 6:  page = std::make_unique<EqPage> (d); break;
         default: page = std::make_unique<SynthPage> (d, waveSrc, specSrc); break;
     }
     addAndMakeVisible (*page);
@@ -2250,7 +2697,7 @@ void TekkforgeEditor::timerCallback()
         if (now[i] != lastValues[i])
         {
             changed = true; lastValues[i] = now[i];
-            if (i >= MODE_BASE && i < LFO_BASE) soundChanged = true;
+            if ((i >= MODE_BASE && i < LFO_BASE) || i >= EQ_BASE) soundChanged = true;
         }
     // Vorhoeren: kurz nach dem Drehen die Note anspielen, damit man jede Aenderung hoert
     const auto nowMs = juce::Time::getMillisecondCounter();

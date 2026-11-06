@@ -31,7 +31,7 @@ public:
     void chooseImport();
     void askRenderSound();
     juce::String status;     // Hinweistext auf den Seiten Sample und Presets
-    int specMode = 0, sampleView = 0, guideView = 0, recipe = 0, sampleOsc = 0, fxScope = 0, envTab = 0, lfoTab = 0;
+    int specMode = 0, sampleView = 0, guideView = 0, recipe = 0, sampleOsc = 0, fxScope = 0, envTab = 0, lfoTab = 0, layerTab = 1, eqScope = 0, eqBand = 0, eqRange = 0;
     bool auditionOn = true;   // gemerkte Ansichten
 
 private:

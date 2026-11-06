@@ -88,7 +88,13 @@ inline const Guide& guideFor (int mode)
             u8"Bass: Pitch Menge 24 bis 48 Halbtöne, Pitch Zeit 30 bis 60 ms.",
             u8"Tiefe Noten etwa zwischen 40 und 65 Hz nehmen, die Note steht oben rechts.",
             u8"Unter etwa 120 Hz mono bleiben. Unison und Breite aus.",
-            u8"Länge ans Tempo binden: Bei 180 BPM liegen nur rund 333 ms zwischen zwei Kicks." } } };
+            u8"Länge ans Tempo binden: Bei 180 BPM liegen nur rund 333 ms zwischen zwei Kicks.",
+            u8"Bass-Lage legt jede Taste automatisch zwischen 40 und 80 Hz. Mit Normal spielt der Bass die echte Tonhöhe.",
+            u8"Charakter im Bass-Panel lädt einen fertigen Startpunkt, von dort aus weiterdrehen.",
+            u8"Boost vor dem Drive setzen, 500 bis 1000 Hz: Dieser Bereich reißt dann zuerst auf und liefert den Hardstyle-Schrei.",
+            u8"Zweite Drive-Stufe hart auf weich stapeln statt eine Stufe bis zum Anschlag aufzudrehen.",
+            u8"Mono bis 120 bis 150 Hz hält Reese und Hoover breit, ohne dass der Sub wackelt.",
+            u8"Layer löschen sich aus? Phase 180 an der Bass-Ebene probieren." } } };
     return g[mode];
 }
 } // namespace tk

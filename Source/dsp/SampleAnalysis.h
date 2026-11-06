@@ -135,7 +135,7 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int layer
     const float bass = r.band[0] + r.band[1];
     const auto tuneTo = [&] (float targetHz)
     {
-        add (LY_PITCH, 1);
+        add (LY_PITCH, 1); add (LY_KEY, 0);
         if (! r.tonal) { add (LY_ROOT, 29); add (LY_TUNE, 0); out.playNote = 29; return; }
         const int oct = (int) std::round (std::log2 (r.hz / targetHz));
         add (LY_ROOT, (float) r.note, "Grundton auf den gemessenen Ton gesetzt");
@@ -144,9 +144,9 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int layer
     };
     if (mode == KICK && layer == 0)
     {
-        add (LY_PITCH, 0); add (LY_FREE, 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
+        add (LY_KEY, 0); add (LY_PITCH, 0); add (LY_FREE, 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
         add (LY_HOLD, 0); add (LY_ATT, 0); add (LY_LEN, 70);
-        add (LY_FTYPE, 1); add (LY_CUT, 300); add (LY_LOWCUT, 240, "Der Bass gehört der Bass-Ebene, hier wird alles darunter entfernt");
+        add (LY_FTYPE, 3); add (LY_CUT, 300); add (LY_LOWCUT, 240, "Der Bass gehört der Bass-Ebene, hier wird alles darunter entfernt");
         add (LY_SUB, 0); add (LY_DRV, 0.35f); add (LY_DRVTYPE, 3); add (LY_DRVTONE, 7000);
         out.playNote = 41;
     }
@@ -155,7 +155,7 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int layer
         tuneTo (52.0f);
         add (LY_FREE, 0, "Die Hüllkurve bestimmt die Länge, damit der Schwanz vor der nächsten Kick endet");
         add (LY_HOLD, 1, "Spielart Notenlänge: Die Note im Piano Roll kürzt den Bass"); add (LY_ATT, 0); add (LY_LEN, 300); add (LY_REL, 20);
-        add (LY_FTYPE, 0); add (LY_CUT, 2500, "Tiefpass nimmt Höhen raus, der Bass bleibt im Fokus"); add (LY_RES, 0.1f);
+        add (LY_FTYPE, 1); add (LY_CUT, 2500, "Tiefpass nimmt Höhen raus, der Bass bleibt im Fokus"); add (LY_RES, 0.1f);
         add (LY_LOWCUT, 30, "Unter 30 Hz kostet nur Headroom");
         add (LY_SUB, bass < 0.5f ? 0.7f : 0.3f, bass < 0.5f ? "Das Sample hat wenig Bass, der Sub trägt das Fundament" : "Das Sample hat schon Bass, der Sub stützt nur");
         add (LY_DRV, 0.35f, "Verzerrung macht den Bass auf kleinen Boxen hörbar"); add (LY_DRVTYPE, 3); add (LY_DRVTONE, 5000);

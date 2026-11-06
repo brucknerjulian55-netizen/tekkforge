@@ -23,6 +23,12 @@ inline float shape (float x, int type, float asym = 0.0f)
         case 0: return softClip (x);
         case 1: return std::clamp (x, -1.0f, 1.0f);
         case 2: return std::sin (std::clamp (x, -32.0f, 32.0f) * 1.5707963f);
+        case 4: { const float y = x > 0 ? 1.0f - std::exp (-x) : -(1.0f - std::exp (x * 0.6f)) * 0.9f; return y; }      // Tube
+        case 5: return x > 0 ? softClip (x) : softClip (x * 0.35f);                                                    // Asym
+        case 6: return 2.0f * std::fabs (softClip (x)) - 1.0f;                                                         // Rectify
+        case 7: return std::sin (std::clamp (x, -32.0f, 32.0f) * 3.14159f);                                            // Sinus
+        case 8: return std::round (softClip (x) * 7.0f) / 7.0f;                                                        // Bit
+        case 9: { const float a = std::sin (std::clamp (x, -32.0f, 32.0f) * 2.6f); return softClip (a * a * a * 3.0f + 0.5f * a); }  // Screech
         default:
         {
             // Tekk: asymmetrisch, oben weich und unten hart, ergibt das knurrende Obertonbild
@@ -181,6 +187,10 @@ public:
             for (auto& b : eq[c]) b.reset();
             hold[c] = 0;
         }
+        for (auto& x : xo) x.reset();
+        for (auto& e : ottEnv) e = 0;
+        tFast = tSlow = 0; tapeKey = 1.0e9f; ringPh = 0; gateNow = 1;
+        std::memset (shiftZ, 0, sizeof shiftZ); shiftPh[0] = shiftPh[1] = 0; shiftFb[0] = shiftFb[1] = 0;
         duckTime = 1.0e6f; lastBeat = -1.0e9; lastNotes = -1; sideOver = false;
         phaser.reset(); wr = 0; lfo = 0; holdCount = 0; envDb = 0; lastEqKey = 1e30f;
     }
@@ -217,6 +227,15 @@ public:
             case FX_COMP:       compressor (L, R, n, p); break;
             case FX_CLIP:       clipper (L, R, n, p); break;
             case FX_SIDECHAIN:  sidechain (L, R, n, p); break;
+            case FX_OTT:        ott (L, R, n, p); break;
+            case FX_TRANSIENT:  transient (L, R, n, p); break;
+            case FX_SHAPER:     shaper (L, R, n, p); break;
+            case FX_STEREO:     stereo (L, R, n, p); break;
+            case FX_SHIFT:      shifter (L, R, n, p); break;
+            case FX_RING:       ringMod (L, R, n, p); break;
+            case FX_RUMBLE:     rumble (L, R, n, p); break;
+            case FX_TAPE:       tape (L, R, n, p); break;
+            case FX_GATE:       gate (L, R, n, p); break;
             default: break;
         }
         const float mix = v[S_MIX];
@@ -431,9 +450,195 @@ private:
         }
     }
 
+    /** Drei Baender, jedes nach oben und unten komprimiert: der OTT-Sound */
+    void ott (float* L, float* R, int n, const float* p)
+    {
+        const float amt = p[0], out = dbToGain (p[5]);
+        const float rel = std::exp (-1.0f / ((0.25f - 0.2f * p[4]) * sr)), atk = std::exp (-1.0f / (0.004f * sr));
+        xo[0].set (120, sr); xo[1].set (120, sr); xo[2].set (2500, sr); xo[3].set (2500, sr);
+        for (int i = 0; i < n; ++i)
+        {
+            float bands[2][3];
+            for (int c = 0; c < 2; ++c)
+            {
+                const float x = c ? R[i] : L[i];
+                bands[c][0] = xo[c].lp (x);
+                const float rest = x - bands[c][0];
+                bands[c][1] = xo[c + 2].lp (rest);
+                bands[c][2] = rest - bands[c][1];
+            }
+            float a = 0, b = 0;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float lv = std::max (std::fabs (bands[0][k]), std::fabs (bands[1][k]));
+                ottEnv[k] = lv > ottEnv[k] ? atk * ottEnv[k] + (1 - atk) * lv : rel * ottEnv[k] + (1 - rel) * lv;
+                const float db = 20.0f * std::log10 (ottEnv[k] + 1.0e-5f);
+                float g = 0;
+                if (db > -18.0f) g = (db + 18.0f) * (0.25f - 1.0f);
+                else if (db > -60.0f) g = (-18.0f - db) * 0.45f;
+                const float gain = dbToGain (std::clamp (g, -36.0f, 24.0f) * amt * p[1 + k]);
+                a += bands[0][k] * gain; b += bands[1][k] * gain;
+            }
+            L[i] = a * out; R[i] = b * out;
+        }
+    }
+    void transient (float* L, float* R, int n, const float* p)
+    {
+        const float fast = std::exp (-1.0f / (0.0007f * sr)), slow = std::exp (-1.0f / (p[2] * 0.001f * sr)), out = dbToGain (p[5]);
+        setLowcut (p[3]);
+        for (int i = 0; i < n; ++i)
+        {
+            const float lv = std::max (std::fabs (L[i]), std::fabs (R[i]));
+            tFast = fast * tFast + (1 - fast) * lv; tSlow = slow * tSlow + (1 - slow) * lv;
+            const float d = (tFast - tSlow) / (tSlow + 1.0e-4f);
+            const float g = dbToGain (std::clamp (d > 0 ? p[0] * d * 18.0f : p[1] * (-d) * 18.0f, -24.0f, 24.0f));
+            float a = L[i] * g, b = R[i] * g;
+            if (p[4] > 0) { a += (softClip (a) - a) * p[4]; b += (softClip (b) - b) * p[4]; }
+            L[i] = a * out; R[i] = b * out;
+        }
+    }
+    void shaper (float* L, float* R, int n, const float* p)
+    {
+        const int t = (int) p[0]; const float g = dbToGain (p[1]), bias = p[2] * 0.5f, out = dbToGain (p[5]);
+        setTone (p[3]); setLowcut (p[4]);
+        const auto f = [&] (float x)
+        {
+            x = x * g + bias;
+            switch (t)
+            {
+                case 0: return std::sin (std::clamp (x, -32.0f, 32.0f));
+                case 1: return std::round (std::clamp (x, -1.0f, 1.0f) * 5.0f) / 5.0f;
+                case 2: { const float a = std::clamp (x, -1.0f, 1.0f); return (a > 0 ? 1.0f : -1.0f) * (std::exp (std::fabs (a) * 2.0f) - 1.0f) / 6.39f; }
+                case 3: { const float a = std::clamp (x, -1.0f, 1.0f); return a * a * a; }
+                case 4: { const float a = softClip (x); return 4 * a * a * a - 3 * a; }
+                default: return std::clamp (x * 2.0f, -1.0f, 1.0f);
+            }
+        };
+        for (int i = 0; i < n; ++i)
+        {
+            L[i] = post[0].lp (hp[0].hp (f (L[i]))) * out;
+            R[i] = post[1].lp (hp[1].hp (f (R[i]))) * out;
+        }
+    }
+    void stereo (float* L, float* R, int n, const float* p)
+    {
+        const float width = p[0], out = dbToGain (p[5]), pan = p[3], side = dbToGain (p[4]);
+        const float gl = std::min (1.0f, 1.0f - pan), gr = std::min (1.0f, 1.0f + pan);
+        setLowcut (p[1]); setTone (2500);
+        const float haas = p[2] * 0.001f * sr;
+        for (int i = 0; i < n; ++i)
+        {
+            float a = L[i], b = R[i];
+            if (haas > 1.0f) { dl[0][(size_t) wr] = b; b = readDl (0, haas); if (++wr >= dlLen) wr = 0; }
+            const float m = 0.5f * (a + b), s = 0.5f * (a - b);
+            const float low = hp[0].lp (s), high = s - low, highTop = high - post[0].lp (high);
+            const float sNew = (high + highTop * (side - 1.0f)) * width;      // Unter der Mono-Grenze bleibt nichts in der Seite
+            L[i] = (m + sNew) * gl * out; R[i] = (m - sNew) * gr * out;
+        }
+    }
+    /** Allpass-Paar fuer eine 90-Grad-Verschiebung, Grundlage des Bode-Shifters */
+    float hilbert (float x, float* z, const float* k)
+    {
+        for (int i = 0; i < 4; ++i) { const float y = k[i] * (x - z[i * 2 + 1]) + z[i * 2]; z[i * 2] = x; z[i * 2 + 1] = y; x = y; }
+        return x;
+    }
+    void shifter (float* L, float* R, int n, const float* p)
+    {
+        static const float a[4] = { 0.6923878f, 0.9360654f, 0.9882295f, 0.9987488f }, b[4] = { 0.4021921f, 0.8561711f, 0.9722910f, 0.9952885f };
+        const float out = dbToGain (p[5]);
+        setLowcut (p[3]); setTone (p[4]);
+        for (int c = 0; c < 2; ++c)
+        {
+            float* x = c ? R : L;
+            const float hz = p[0] * (c ? 1.0f + p[1] : 1.0f - p[1]);
+            float ph = shiftPh[c];
+            for (int i = 0; i < n; ++i)
+            {
+                ph += hz / sr; ph -= std::floor (ph);
+                const float in = hp[c].hp (x[i]) + shiftFb[c] * p[2];
+                const float i0 = hilbert (in, shiftZ[c][0], a), q0 = hilbert (in, shiftZ[c][1], b);
+                const float y = i0 * std::cos (2 * kPi * ph) - q0 * std::sin (2 * kPi * ph);
+                shiftFb[c] = softClip (y);
+                x[i] = post[c].lp (y) * out;
+            }
+            shiftPh[c] = ph;
+        }
+    }
+    void ringMod (float* L, float* R, int n, const float* p)
+    {
+        const float out = dbToGain (p[5]);
+        setLowcut (p[4]);
+        for (int i = 0; i < n; ++i)
+        {
+            lfo += p[3] / sr; if (lfo >= 1) lfo -= 1;
+            const float hz = p[0] * std::pow (2.0f, std::sin (2 * kPi * lfo) * p[2] * 2.0f);
+            ringPh += hz / sr; ringPh -= std::floor (ringPh);
+            const float s = std::sin (2 * kPi * ringPh), m = s * (1 - p[1]) + (s > 0 ? 1.0f : -1.0f) * p[1];
+            L[i] = hp[0].hp (L[i]) * m * out; R[i] = hp[1].hp (R[i]) * m * out;
+        }
+    }
+    /** Tiefe Hall-Fahne: Das Trockensignal bleibt, der Rumble wird verzerrt, gefiltert und vom Signal geduckt */
+    void rumble (float* L, float* R, int n, const float* p)
+    {
+        const float fbk2 = 0.78f + p[1] * 0.2f, g = dbToGain (p[3]), out = dbToGain (p[5]);
+        setTone (p[2]); setLowcut (30);
+        const float atk = std::exp (-1.0f / (0.002f * sr)), rel = std::exp (-1.0f / (0.12f * sr));
+        for (int i = 0; i < n; ++i)
+        {
+            const float dry = 0.5f * (L[i] + R[i]), in = dry * 0.06f;
+            float a = 0;
+            for (auto& c : comb[0]) a += c.run (in, fbk2, 0.3f);
+            a = softClip (hp[0].hp (post[0].lp (post[1].lp (a))) * g);
+            const float lv = std::fabs (dry);
+            tSlow = lv > tSlow ? atk * tSlow + (1 - atk) * lv : rel * tSlow + (1 - rel) * lv;
+            const float duck = 1.0f - p[4] * std::min (1.0f, tSlow * 2.5f);
+            const float w = a * duck * p[0];
+            L[i] = (L[i] + w) * out; R[i] = (R[i] + w) * out;
+        }
+    }
+    void tape (float* L, float* R, int n, const float* p)
+    {
+        const float dr = 1.0f + p[0] * 8.0f, comp = 1.0f / (1.0f + p[0] * 1.5f), out = dbToGain (p[5]);
+        setTone (p[3]);
+        if (p[4] != tapeKey) { tapeKey = p[4]; for (int c = 0; c < 2; ++c) eq[c][0].set (Biquad::LOWSHELF, 90, p[4], 0.7f, sr); }
+        for (int i = 0; i < n; ++i)
+        {
+            lfo += 0.7f / sr; if (lfo >= 1) lfo -= 1;
+            ringPh += 11.0f / sr; ringPh -= std::floor (ringPh);
+            const float t = (2.0f + p[1] * 3.0f * (1 + std::sin (2 * kPi * lfo)) + p[2] * 0.5f * (1 + std::sin (2 * kPi * ringPh))) * 0.001f * sr;
+            dl[0][(size_t) wr] = L[i]; dl[1][(size_t) wr] = R[i];
+            const float a = readDl (0, t), b = readDl (1, t);
+            if (++wr >= dlLen) wr = 0;
+            L[i] = post[0].lp (eq[0][0].process (softClip (a * dr) * comp)) * out;
+            R[i] = post[1].lp (eq[1][0].process (softClip (b * dr) * comp)) * out;
+        }
+    }
+    /** Rhythmisches Gate im Takt des Hosts */
+    void gate (float* L, float* R, int n, const float* p)
+    {
+        static const unsigned pat[6] = { 0xAAAA, 0xFFFF, 0x9249, 0xB6DB, 0x4444, 0xCCCC };
+        static const double rate[4] = { 0.5, 1, 2, 4 };
+        if (ctx == nullptr) return;
+        const unsigned bits = pat[(int) p[0]];
+        const float out = dbToGain (p[5]), depth = p[1], soft = std::max (p[2], 0.01f) * 0.02f;
+        const double steps = ctx->ppq * 4.0 * rate[(int) p[4]];
+        const int st = ((int) std::floor (steps)) & 15;
+        const float fr = (float) (steps - std::floor (steps));
+        const float target = ((bits >> st) & 1u) && fr < p[3] ? 1.0f : 0.0f;
+        const float co = std::exp (-1.0f / (soft * sr));
+        for (int i = 0; i < n; ++i)
+        {
+            gateNow = co * gateNow + (1 - co) * target;
+            const float g = 1.0f - depth * (1.0f - gateNow);
+            L[i] *= g * out; R[i] *= g * out;
+        }
+    }
+
     float noise() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (float) (rng & 0xffffff) / 16777216.0f; }
 
     float sr = 44100, duckTime = 1.0e6f;
+    OnePole xo[4];
+    float ottEnv[3] {}, tFast = 0, tSlow = 0, tapeKey = 1.0e9f, ringPh = 0, gateNow = 1, shiftZ[2][2][8] {}, shiftPh[2] {}, shiftFb[2] {};
     double lastBeat = -1.0e9;
     int lastNotes = -1;
     bool sideOver = false;
