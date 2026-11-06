@@ -2188,6 +2188,42 @@ void TekkforgeEditor::chooseSample (int osc)
                           { if (sp != nullptr && c.getResult().existsAsFile()) sp->loadSampleFile (c.getResult(), osc); });
 }
 
+void TekkforgeEditor::askRenderSound()
+{
+    const int mode = (int) proc.rawValue (G_MODE), last = proc.lastNote.load();
+    const int note = last >= 0 ? last : (modeIsMono (mode) ? 29 : 60);
+    auto* w = new juce::AlertWindow (U ("Sound fertig rendern"),
+        U ("Der aktuelle Sound wird mit allen Effekten auf Note ") + noteName (note) + U (" in ein Sample gerechnet. "
+           "Danach steht das ganze Plugin wieder auf Standard und nur dieses Sample bleibt im Modus ") + U (modeName (mode)) + U (".\n\n"
+           "Einstellungen und die anderen Modi sind dann weg. Möchtest du vorher ein Preset speichern?"),
+        juce::MessageBoxIconType::QuestionIcon, this);
+    w->addTextEditor ("name", proc.currentPreset.isNotEmpty() ? proc.currentPreset : U (modeName (mode)) + " " + noteName (note), U ("Presetname"));
+    w->addButton (U ("Speichern und rendern"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton (U ("Ohne Speichern rendern"), 2);
+    w->addButton (U ("Abbrechen"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([sp = SafePointer<TekkforgeEditor> (this), w, mode, note] (int choice)
+    {
+        std::unique_ptr<juce::AlertWindow> owner (w);
+        if (sp == nullptr || choice == 0) return;
+        auto& pr = sp->proc;
+        String msg;
+        auto data = pr.renderSound (note, msg);    // zuerst rendern: scheitert es, bleibt alles unveraendert
+        if (data == nullptr) { sp->status = msg; sp->requestRebuild(); return; }
+        if (choice == 1)
+        {
+            const auto base = juce::File::createLegalFileName (w->getTextEditorContents ("name").trim());
+            if (base.isEmpty()) { sp->status = U ("Gib dem Preset einen Namen. Es wurde nichts geändert."); sp->requestRebuild(); return; }
+            const auto file = pr.presetFolder().getChildFile (base + ".tkf").getNonexistentSibling (false);
+            if (! pr.savePresetFile (file)) { sp->status = U ("Speichern ist fehlgeschlagen. Es wurde nichts geändert."); sp->requestRebuild(); return; }
+        }
+        const auto seconds = (float) data->length() / data->rate;
+        pr.applyRendered (std::move (data), mode, note);
+        sp->sampleOsc = 0;
+        sp->status = U ("Fertig gerendert: ") + String (seconds, 2) + U (" s. Das Plugin steht auf Standard.");
+        sp->showPage (1);
+    }), false);
+}
+
 void TekkforgeEditor::chooseExport()
 {
     chooser = std::make_unique<juce::FileChooser> (U ("Preset exportieren"), juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.tkf");
