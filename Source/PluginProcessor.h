@@ -11,7 +11,12 @@ public:
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
-    bool isBusesLayoutSupported (const BusesLayout& l) const override { return l.getMainOutputChannelSet() == juce::AudioChannelSet::stereo(); }
+    bool isBusesLayoutSupported (const BusesLayout& l) const override
+    {
+        const auto in = l.getChannelSet (true, 0);
+        return l.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
+            && (in.isDisabled() || in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo());
+    }
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -47,11 +52,11 @@ public:
     void snapshot (float* out) const { for (int i = 0; i < tk::NUM_PARAMS; ++i) out[i] = rawValue (i); }
     void shapeLane (int lane, int shape);
 
-    // Samples: eine je Modus; wird beim Speichern eingebettet
-    std::atomic<const tk::SampleData*> samples[tk::NUM_MODES];
+    // Samples: je Modus und Oszillator; werden beim Speichern eingebettet
+    std::atomic<const tk::SampleData*> samples[tk::NUM_MODES * tk::NUM_OSCS];
     std::atomic<int> sampleVersion { 0 };
-    bool loadSample (int mode, const juce::File&, juce::String& message);
-    void clearSample (int mode);
+    bool loadSample (int mode, int osc, const juce::File&, juce::String& message);
+    void clearSample (int mode, int osc);
 
     // Presets
     juce::File presetFolder() const;
@@ -76,7 +81,7 @@ private:
     void handleAsyncUpdate() override;
     juce::AudioProcessorValueTreeState::ParameterLayout makeLayout();
     void applyQuality (int q);
-    void installSample (int mode, std::unique_ptr<tk::SampleData>);
+    void installSample (int slot, std::unique_ptr<tk::SampleData>);
     std::unique_ptr<juce::XmlElement> stateToXml();
     void stateFromXml (const juce::XmlElement&);
 

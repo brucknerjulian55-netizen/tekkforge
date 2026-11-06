@@ -113,9 +113,9 @@ public:
     {
         auto b = getLocalBounds().removeFromBottom (30);
         g.setColour (theme::dim); g.setFont (theme::font (12.0f));
-        g.drawText (name, b.removeFromTop (14), juce::Justification::centred, false);
+        g.drawFittedText (name, b.removeFromTop (14), juce::Justification::centred, 1, 0.7f);
         g.setColour (theme::ink); g.setFont (theme::font (12.0f));
-        g.drawText (shown, b, juce::Justification::centred, false);
+        g.drawFittedText (shown, b, juce::Justification::centred, 1, 0.7f);
     }
     void tick() override
     {
@@ -270,10 +270,35 @@ protected:
 class WaveDisp : public XYDisp
 {
 public:
-    WaveDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_WAVE), modeParam (ed.mode, M_UNI), modeParam (ed.mode, M_DETUNE) }, M_WAVE, -1) {}
+    WaveDisp (Ed& ed, int oscIndex) : XYDisp (ed, { modeParam (ed.mode, O (oscIndex, O_WAVE)), modeParam (ed.mode, O (oscIndex, O_UNI)), modeParam (ed.mode, O (oscIndex, O_DETUNE)),
+                                                    modeParam (ed.mode, O (oscIndex, O_SRC)) }, O (oscIndex, O_WAVE), -1), osc (oscIndex) {}
+    const SampleData* sample() const { return d.p.samples[sampleSlot (d.mode, osc)].load(); }
+    bool isSample() const { return val (O (osc, O_SRC)) > 0.5f; }
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float w = val (M_WAVE); Path p; const int N = 200;
+        if (isSample())
+        {
+            const auto* s = sample();
+            if (s == nullptr)
+            {
+                g.setColour (theme::dim); g.setFont (theme::font (13.0f));
+                g.drawText (U ("Sample hierher ziehen oder klicken"), b, juce::Justification::centred, false);
+                return;
+            }
+            const int cols = (int) b.getWidth(), n = s->length();
+            g.setColour (d.acc);
+            for (int x = 0; x < cols; ++x)
+            {
+                float top = 0;
+                const int from = (int) ((juce::int64) x * n / cols), to = juce::jmax (from + 1, (int) ((juce::int64) (x + 1) * n / cols));
+                for (int i = from; i < to; i += juce::jmax (1, (to - from) / 24)) top = juce::jmax (top, std::fabs (s->l[(size_t) i]));
+                g.fillRect (b.getX() + (float) x, b.getCentreY() - top * b.getHeight() * 0.46f, 1.0f, top * b.getHeight() * 0.92f);
+            }
+            g.setColour (theme::ink); g.setFont (theme::font (11.5f));
+            g.drawText (U (s->name), b.removeFromTop (13.0f), juce::Justification::centredLeft, true);
+            return;
+        }
+        const float w = val (O (osc, O_WAVE)); Path p; const int N = 200;
         for (int i = 0; i <= N; ++i)
         {
             const float ph = std::fmod ((float) i / (float) N * 2.0f, 1.0f);
@@ -281,20 +306,30 @@ public:
             const float x = b.getX() + b.getWidth() * (float) i / (float) N;
             if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
         }
-        const int uni = (int) std::round (val (M_UNI));
+        const int uni = (int) std::round (val (O (osc, O_UNI)));
         for (int u = 1; u < uni; ++u)
         {
-            const float o = (float) (u - uni / 2) * juce::jmin (5.0f, val (M_DETUNE) * 0.25f);
+            const float o = (float) (u - uni / 2) * juce::jmin (5.0f, val (O (osc, O_DETUNE)) * 0.25f);
             g.setColour (d.acc.withAlpha (0.25f));
             g.strokePath (p, juce::PathStrokeType (1.0f), juce::AffineTransform::translation (o, 0));
         }
         stroke (g, p);
-        static const char* n[] = { "Sinus", "Dreieck", "Säge", "Rechteck" };
-        g.setColour (theme::dim); g.setFont (theme::font (11.5f));
-        for (int i = 0; i < 4; ++i)
-            g.drawText (U (n[i]), Rectangle<float> (b.getX() + b.getWidth() * (float) i / 4.0f, b.getBottom() - 13, b.getWidth() / 4.0f, 13),
-                        juce::Justification::centred, false);
     }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (isSample()) { if (sample() == nullptr) d.e.chooseSample (osc); return; }
+        XYDisp::mouseDown (e);
+    }
+    void mouseDrag (const juce::MouseEvent& e) override { if (! isSample()) XYDisp::mouseDrag (e); }
+    void mouseUp (const juce::MouseEvent& e) override { if (! isSample()) XYDisp::mouseUp (e); }
+    void tick() override
+    {
+        Disp::tick();
+        const int v = d.p.sampleVersion.load();
+        if (v != seen) { seen = v; repaint(); }
+    }
+private:
+    int osc, seen = -1;
 };
 
 class PitchDisp : public XYDisp
@@ -322,8 +357,9 @@ public:
 class AmpDisp : public Disp
 {
 public:
-    AmpDisp (Ed& ed) : Disp (ed, { modeParam (ed.mode, M_ATT), modeParam (ed.mode, M_HOLD), modeParam (ed.mode, M_DEC), modeParam (ed.mode, M_SUS), modeParam (ed.mode, M_REL), modeParam (ed.mode, M_ACURVE), modeParam (ed.mode, M_GATE) }) {}
+    AmpDisp (Ed& ed) : Disp (ed, { modeParam (ed.mode, M_ATT), modeParam (ed.mode, M_HOLD), modeParam (ed.mode, M_DEC), modeParam (ed.mode, M_SUS), modeParam (ed.mode, M_REL), modeParam (ed.mode, M_ACURVE), modeParam (ed.mode, M_GATE), modeParam (ed.mode, M_LENGTH) }) {}
     bool gate() const { return val (M_GATE) > 0.5f; }
+    float susValue() const { const int g = (int) val (M_GATE); return g == 2 ? 1.0f : g == 1 ? val (M_SUS) : 0.0f; }
     float px (int i) const   // Jeder Abschnitt nutzt ein Viertel der Breite, verschoben um die Vorgaenger
     {
         static const int order[4] = { M_ATT, M_HOLD, M_DEC, M_REL };
@@ -332,7 +368,7 @@ public:
     }
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float sus = gate() ? val (M_SUS) : 0.0f, c = 0.6f + val (M_ACURVE) * 5.4f;
+        const float sus = susValue(), c = 0.6f + val (M_ACURVE) * 5.4f;
         const auto X = [&] (float n) { return b.getX() + n * b.getWidth(); };
         const auto Y = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
         const float a = X (px (0)), h = X (px (1)), de = X (px (2)), r = X (px (3));
@@ -512,9 +548,11 @@ struct TekkforgeEditor::Preview : public juce::Thread
             std::array<float, NUM_PARAMS> v; int note;
             { std::lock_guard<std::mutex> l (m); if (! pending) continue; v = want; note = wantNote; pending = false; }
             const int mode = (int) v[G_MODE]; const float* q = v.data() + modeParam (mode, 0);
-            const float body = (q[M_ATT] + q[M_HOLD] + q[M_DEC]) * 0.001f;
+            const float body = (q[M_ATT] + q[M_LENGTH]) * 0.001f;
             float wanted = body * 1.05f + (q[M_GATE] > 0.5f ? q[M_REL] * 0.001f : 0.0f) + 0.02f;
-            if (const auto* smp = p.samples[mode].load(); smp != nullptr && q[M_SMPFREE] > 0.5f) wanted = juce::jmax (wanted, (float) smp->length() / smp->rate);
+            for (int o = 0; o < NUM_OSCS; ++o)
+                if (const auto* smp = p.samples[sampleSlot (mode, o)].load(); smp != nullptr && q[O (o, O_SRC)] > 0.5f && q[O (o, O_FREE)] > 0.5f)
+                    wanted = juce::jmax (wanted, (float) smp->length() / smp->rate);
             const float secs = juce::jlimit (0.08f, 3.0f, wanted);
             const int n = (int) (secs * 44100.0f); L.assign ((size_t) n, 0); R.assign ((size_t) n, 0);
             engine->reset(); engine->noteOn (note, 1.0f, v.data());
@@ -760,9 +798,81 @@ public:
         }
         if (fill != nullptr) fill->setBounds (b.reduced (0, 2));
     }
-    juce::Component* fill = nullptr; Strip* headStrip = nullptr; int headWidth = 120;
+    juce::Component* fill = nullptr; Strip* headStrip = nullptr; int headWidth = 120, oscIndex = -1;
 private:
     Ed& d; String title; std::vector<std::unique_ptr<juce::Component>> keep; std::vector<Knob*> knobs;
+};
+
+// ---------------- LFOs und Envs -------------------------------------------
+class LfoView : public Ticking
+{
+public:
+    LfoView (Ed& ed, int index) : d (ed), lfo (index) {}
+    void tick() override { const float v = d.p.engine.sourceView[lfo].load (std::memory_order_relaxed); if (v != last) { last = v; repaint(); } }
+    void paint (Graphics& g) override
+    {
+        auto o = getLocalBounds().toFloat();
+        g.setColour (theme::well); g.fillRoundedRectangle (o, 6.0f);
+        auto b = o.reduced (6.0f);
+        const int s = (int) d.p.rawValue (lfoParam (lfo, LF_SHAPE));
+        Path p;
+        for (int i = 0; i <= 160; ++i)
+        {
+            const float t = (float) i / 160.0f, x = std::fmod (t * 2.0f, 1.0f); float y;
+            switch (s) { case 0: y = std::sin (6.2831853f * x); break; case 1: y = x < 0.25f ? 4 * x : x < 0.75f ? 2 - 4 * x : 4 * x - 4; break;
+                         case 2: y = 1 - 2 * x; break; case 3: y = x < 0.5f ? 1.0f : -1.0f; break;
+                         default: y = std::sin (std::floor (t * 12.0f) * 7.3f); break; }
+            const float px = b.getX() + t * b.getWidth(), py = b.getCentreY() - y * b.getHeight() * 0.44f;
+            if (i == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
+        }
+        g.setColour (d.acc); g.strokePath (p, juce::PathStrokeType (2.0f));
+        const float dy = b.getCentreY() - last * b.getHeight() * 0.44f;
+        g.setColour (theme::ink); g.fillRoundedRectangle (b.getRight() - 6, dy - 3, 6, 6, 3);
+    }
+private:
+    Ed& d; int lfo; float last = 2;
+};
+
+class EnvView : public Disp
+{
+public:
+    EnvView (Ed& ed, int index) : Disp (ed, { envParam (index, EV_ATT), envParam (index, EV_DEC), envParam (index, EV_SUS), envParam (index, EV_REL), envParam (index, EV_CURVE) }), env (index) {}
+    void draw (Graphics& g, Rectangle<float> b) override
+    {
+        const auto n = [&] (int k) { return d.p.param (envParam (env, k))->getValue(); };
+        const float a = n (EV_ATT) * 0.33f, de = a + n (EV_DEC) * 0.33f, su = n (EV_SUS), r = de + 0.1f + n (EV_REL) * 0.23f;
+        const float c = 0.6f + d.p.rawValue (envParam (env, EV_CURVE)) * 5.4f;
+        const auto X = [&] (float x) { return b.getX() + x * b.getWidth(); }; const auto Y = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
+        Path p; p.startNewSubPath (X (0), Y (0)); p.lineTo (X (a), Y (1));
+        for (int i = 1; i <= 50; ++i) { const float t = (float) i / 50.0f; p.lineTo (X (a + (de - a) * t), Y (su + (1 - su) * std::pow (1 - t, c))); }
+        p.lineTo (X (de + 0.1f), Y (su));
+        for (int i = 1; i <= 30; ++i) { const float t = (float) i / 30.0f; p.lineTo (X (de + 0.1f + (r - de - 0.1f) * t), Y (su * std::pow (1 - t, 3.0f))); }
+        fillUnder (g, p, b); stroke (g, p);
+    }
+private:
+    int env;
+};
+
+class LfoBox : public Ticking
+{
+public:
+    LfoBox (Ed& ed, int i) : view (ed, i), shape (ed, lfoParam (i, LF_SHAPE)), sync (ed, lfoParam (i, LF_SYNC)), div (ed, lfoParam (i, LF_DIV), 4), retrig (ed, lfoParam (i, LF_RETRIG)),
+                             rate (ed, lfoParam (i, LF_HZ), "Tempo")
+    {
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &view, &shape, &sync, &div, &retrig, &rate }) addAndMakeVisible (c);
+    }
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        div.setBounds (b.removeFromBottom (40)); b.removeFromBottom (2);
+        auto r = b.removeFromBottom (20); sync.setBounds (r.removeFromLeft (r.getWidth() / 2)); retrig.setBounds (r);
+        b.removeFromBottom (2);
+        shape.setBounds (b.removeFromBottom (20)); b.removeFromBottom (2);
+        rate.setBounds (b.removeFromRight (56)); view.setBounds (b);
+    }
+    void tick() override { view.tick(); shape.tick(); sync.tick(); div.tick(); retrig.tick(); rate.tick(); }
+private:
+    LfoView view; Strip shape, sync, div, retrig; Knob rate;
 };
 
 // ---------------- Seite: Synth ---------------------------------------------
@@ -773,61 +883,88 @@ public:
         : d (ed), wave (d, src), spectrum (d, spec)
     {
         addAndMakeVisible (wave); addAndMakeVisible (spectrum);
-        auto add = [&] (const char* t) { panels.push_back (std::make_unique<Panel> (d, U (t))); addAndMakeVisible (*panels.back()); return panels.back().get(); };
+        auto add = [&] (const String& t) { panels.push_back (std::make_unique<Panel> (d, t)); addAndMakeVisible (*panels.back()); return panels.back().get(); };
 
-        auto* osc = add ("Oszillator"); osc->fill = osc->own (std::make_unique<WaveDisp> (d));
-        osc->knob (M_WAVE, "Welle"); osc->knob (M_UNI, "Stimmen"); osc->knob (M_DETUNE, "Verst."); osc->knob (M_WIDTH, "Breite"); osc->knob (M_TUNE, "Tune"); osc->knob (M_FINE, "Fein"); osc->knob (M_OSCLVL, "Pegel");
+        for (int o = 0; o < NUM_OSCS; ++o)
+        {
+            auto* p = add ("Oszillator " + String::charToString ((juce::juce_wchar) ('A' + o)));
+            p->oscIndex = o;
+            p->fill = p->own (std::make_unique<WaveDisp> (d, o));
+            p->headStrip = p->own (std::make_unique<Strip> (d, modeParam (d.mode, O (o, O_SRC)))); p->headWidth = 130;
+            p->knob (O (o, O_LVL), "Pegel"); p->knob (O (o, O_WAVE), "Welle"); p->knob (O (o, O_TUNE), "Tune"); p->knob (O (o, O_FINE), "Fein");
+            p->knob (O (o, O_UNI), "Stimmen"); p->knob (O (o, O_DETUNE), "Verst."); p->knob (O (o, O_WIDTH), "Breite");
+        }
+        auto* sub = add ("Sub"); sub->fill = sub->own (std::make_unique<SubDisp> (d));
+        sub->headStrip = sub->own (std::make_unique<Strip> (d, modeParam (d.mode, M_SUBOCT))); sub->headWidth = 100;
+        sub->knob (M_SUBLVL, "Lautstärke");
 
-        auto* pit = add ("Pitch-Hüllkurve"); pit->fill = pit->own (std::make_unique<PitchDisp> (d));
+        auto* out = add ("Ausgang");
+        out->knob (M_LOWCUT, "Lowcut"); out->knob (M_VEL, "Velocity"); out->knob (M_LEVEL, "Pegel");
+
+        auto* amp = add (U ("Lautstärke")); amp->fill = amp->own (std::make_unique<AmpDisp> (d));
+        amp->headStrip = amp->own (std::make_unique<Strip> (d, modeParam (d.mode, M_GATE))); amp->headWidth = 220;
+        amp->knob (M_LENGTH, "Länge"); amp->knob (M_ATT, "Attack"); amp->knob (M_HOLD, "Hold"); amp->knob (M_DEC, "Decay");
+        amp->knob (M_SUS, "Sustain"); amp->knob (M_REL, "Release"); amp->knob (M_ACURVE, "Kurve");
+
+        auto* pit = add (U ("Pitch-Hüllkurve")); pit->fill = pit->own (std::make_unique<PitchDisp> (d));
         pit->knob (M_PAMT, "Menge"); pit->knob (M_PTIME, "Zeit"); pit->knob (M_PCURVE, "Kurve");
 
-        auto* amp = add ("Lautstärke"); amp->fill = amp->own (std::make_unique<AmpDisp> (d));
-        amp->headStrip = amp->own (std::make_unique<Strip> (d, modeParam (d.mode, M_GATE))); amp->headWidth = 150;
-        amp->knob (M_ATT, "Attack"); amp->knob (M_HOLD, "Hold"); amp->knob (M_DEC, "Decay"); amp->knob (M_SUS, "Sustain"); amp->knob (M_REL, "Release"); amp->knob (M_ACURVE, "Kurve");
-
         auto* fil = add ("Filter"); fil->fill = fil->own (std::make_unique<FilterDisp> (d));
-        fil->headStrip = fil->own (std::make_unique<Strip> (d, modeParam (d.mode, M_FTYPE)));
+        fil->headStrip = fil->own (std::make_unique<Strip> (d, modeParam (d.mode, M_FTYPE))); fil->headWidth = 130;
         fil->knob (M_CUT, "Cutoff"); fil->knob (M_RES, "Reso"); fil->knob (M_FENV, "Env"); fil->knob (M_FDEC, "Env Zeit");
-
-        auto* clk = add ("Click"); clk->fill = clk->own (std::make_unique<ClickDisp> (d));
-        clk->knob (M_CLKLVL, "Pegel"); clk->knob (M_CLKTONE, "Ton"); clk->knob (M_CLKLEN, "Länge"); clk->knob (M_CLKNOISE, "Rauschen");
 
         if (modeIsMono (d.mode))
         {
-            auto* sub = add ("Sub"); sub->fill = sub->own (std::make_unique<SubDisp> (d));
-            sub->headStrip = sub->own (std::make_unique<Strip> (d, modeParam (d.mode, M_SUBOCT)));
-            sub->knob (M_SUBLVL, "Pegel");
+            auto* clk = add ("Click"); clk->fill = clk->own (std::make_unique<ClickDisp> (d));
+            clk->knob (M_CLKLVL, "Pegel"); clk->knob (M_CLKTONE, "Ton"); clk->knob (M_CLKLEN, "Länge"); clk->knob (M_CLKNOISE, "Rauschen");
         }
         else
         {
             auto* cho = add ("Akkord");
-            auto* box = cho->own (std::make_unique<ChordBox> (d));
-            cho->fill = box;
+            cho->fill = cho->own (std::make_unique<ChordBox> (d));
             cho->knob (M_STRUM, "Strum");
         }
         auto* drv = add ("Drive"); drv->fill = drv->own (std::make_unique<DriveDisp> (d));
-        drv->headStrip = drv->own (std::make_unique<Strip> (d, modeParam (d.mode, M_DRVTYPE))); drv->headWidth = 170;
+        drv->headStrip = drv->own (std::make_unique<Strip> (d, modeParam (d.mode, M_DRVTYPE))); drv->headWidth = 108;
         drv->knob (M_DRV, "Drive"); drv->knob (M_DRVTONE, "Ton");
 
-        auto* out = add ("Ausgang");
-        out->knob (M_LOWCUT, "Lowcut"); out->knob (M_VEL, "Velocity"); out->knob (M_LEVEL, "Pegel");
+        for (int i = 0; i < NUM_LFOS; ++i)
+        {
+            auto* p = add ("LFO " + String (i + 1));
+            p->fill = p->own (std::make_unique<LfoBox> (d, i));
+        }
+        for (int i = 0; i < NUM_ENVS; ++i)
+        {
+            auto* p = add ("Env " + String (i + 1));
+            p->fill = p->own (std::make_unique<EnvView> (d, i));
+            p->knobAbs (envParam (i, EV_ATT), "Attack"); p->knobAbs (envParam (i, EV_DEC), "Decay"); p->knobAbs (envParam (i, EV_SUS), "Sustain");
+            p->knobAbs (envParam (i, EV_REL), "Release"); p->knobAbs (envParam (i, EV_CURVE), "Kurve");
+        }
     }
     struct ChordBox : public Ticking
     {
         explicit ChordBox (Ed& ed) : disp (ed), strip (ed, modeParam (ed.mode, M_CHORD), 5) { addAndMakeVisible (disp); addAndMakeVisible (strip); }
-        void resized() override { auto b = getLocalBounds(); strip.setBounds (b.removeFromBottom (50)); b.removeFromBottom (3); disp.setBounds (b); }
+        void resized() override { auto b = getLocalBounds(); strip.setBounds (b.removeFromBottom (44)); b.removeFromBottom (3); disp.setBounds (b); }
+        void tick() override { disp.tick(); strip.tick(); }
         ChordDisp disp; Strip strip;
     };
     void resized() override
     {
         auto b = getLocalBounds();
-        auto topRow = b.removeFromTop (162);
+        auto topRow = b.removeFromTop (116);
         wave.setBounds (topRow.removeFromLeft (topRow.getWidth() * 45 / 100)); topRow.removeFromLeft (8); spectrum.setBounds (topRow);
         b.removeFromTop (8);
-        auto r1 = b.removeFromTop ((b.getHeight() - 8) / 2); b.removeFromTop (8);
+        const int rowH = (b.getHeight() - 16) / 3;
+        auto r1 = b.removeFromTop (rowH); b.removeFromTop (8);
+        auto r2 = b.removeFromTop (rowH); b.removeFromTop (8);
         const auto place = [] (juce::Rectangle<int>& row, Panel& p, int w) { p.setBounds (row.removeFromLeft (w)); row.removeFromLeft (8); };
-        place (r1, *panels[0], 400); place (r1, *panels[1], 260); panels[2]->setBounds (r1);
-        place (b, *panels[3], 310); place (b, *panels[4], 280); place (b, *panels[5], 250); place (b, *panels[6], 210); panels[7]->setBounds (b);
+        size_t i = 0;
+        for (int o = 0; o < NUM_OSCS; ++o) place (r1, *panels[i++], 306);
+        place (r1, *panels[i++], 166); panels[i++]->setBounds (r1);
+        place (r2, *panels[i++], 400); place (r2, *panels[i++], 180); place (r2, *panels[i++], 270); place (r2, *panels[i++], 210); panels[i++]->setBounds (r2);
+        for (int k = 0; k < NUM_LFOS; ++k) place (b, *panels[i++], 186);
+        const int ew = (b.getWidth() - 16) / NUM_ENVS;
+        for (int k = 0; k < NUM_ENVS; ++k) place (b, *panels[i++], ew);
     }
 private:
     Ed& d; WaveShapeView wave; Spectrum spectrum;
@@ -929,6 +1066,8 @@ public:
             case FX_DELAY:      { float lvl = 1; const float fb = v (1); const int n = juce::jlimit (2, 14, (int) (1800.0f / juce::jmax (40.0f, v (0)))); g.setColour (d.acc);
                                   for (int i = 0; i < 14 && i < n + 8; ++i) { const float x = b.getX() + b.getWidth() * (float) i / (float) n; if (x > b.getRight()) break; g.fillRoundedRectangle (x, b.getBottom() - lvl * b.getHeight(), 6.0f, lvl * b.getHeight(), 2.0f); lvl *= fb; } break; }
             case FX_REVERB:     { const float tau = 0.08f + v (0) * 0.5f; curve ([&] (float x) { return std::exp (-x / tau) * 0.95f; }); break; }
+            case FX_SIDECHAIN:  { const float a = v (2) / 600.0f, l = v (3) / 600.0f, de = v (1);
+                                  curve ([&] (float x) { const float t = std::fmod (x * 2.0f, 1.0f) * 0.5f; float e = t < a ? t / a : t < a + l ? 1 - (t - a) / l : 0; e = e * e * (3 - 2 * e); return 0.95f * (1 - de * e); }); break; }
             case FX_COMP:       { curve ([&] (float x) { const float in = -60.0f * (1 - x), ov = in - v (0), o2 = ov > 0 ? v (0) + ov / v (1) : in; return 1.0f + o2 / 60.0f; }); break; }
             default:
                 g.setColour (theme::dim); g.setFont (theme::font (16.0f));
@@ -1287,10 +1426,11 @@ private:
 class SampleWave : public Ticking
 {
 public:
-    explicit SampleWave (Ed& ed) : d (ed), start { ed.p.param (modeParam (ed.mode, M_SMPSTART)) }
+    explicit SampleWave (Ed& ed) : d (ed), osc (ed.e.sampleOsc), start { ed.p.param (modeParam (ed.mode, O (ed.e.sampleOsc, O_START))) }
     {
-        if (const auto* s = ed.p.samples[ed.mode].load()) report = analyzeSample (*s);
+        if (const auto* s = current()) report = analyzeSample (*s);
     }
+    const SampleData* current() const { return d.p.samples[sampleSlot (d.mode, osc)].load(); }
     Rectangle<int> tabs() const { return { 16, 14, 230, 22 }; }
     void buildSonogram (const SampleData& s, int w, int h)
     {
@@ -1328,7 +1468,7 @@ public:
         auto o = getLocalBounds().toFloat();
         g.setColour (theme::well); g.fillRoundedRectangle (o, 6.0f);
         auto b = o.reduced (10.0f);
-        const auto* s = d.p.samples[d.mode].load();
+        const auto* s = current();
         if (s == nullptr || s->length() < 2)
         {
             g.setColour (theme::ink); g.setFont (theme::font (19.0f, true));
@@ -1398,8 +1538,8 @@ public:
     void mouseExit (const juce::MouseEvent&) override { hover = { -1, -1 }; repaint(); }
     void mouseDown (const juce::MouseEvent& e) override
     {
-        const auto* s = d.p.samples[d.mode].load();
-        if (s == nullptr) { d.e.chooseSample(); return; }
+        const auto* s = current();
+        if (s == nullptr) { d.e.chooseSample (osc); return; }
         if (tabs().contains (e.getPosition()))
         {
             d.e.sampleView = e.x < tabs().getCentreX() ? 0 : 1;
@@ -1412,7 +1552,7 @@ public:
     void mouseUp (const juce::MouseEvent&) override { if (dragging) { start.end(); dragging = false; } }
     void tick() override { const float v = start.norm(); if (v != last) { last = v; repaint(); } }
 private:
-    Ed& d; PRef start; float last = -1; SampleReport report; juce::Image sono;
+    Ed& d; int osc; PRef start; float last = -1; SampleReport report; juce::Image sono;
     juce::Point<int> hover { -1, -1 }; bool dragging = false;
 };
 
@@ -1425,23 +1565,33 @@ static void styleButton (juce::TextButton& b)
 class SamplePage : public Ticking
 {
 public:
-    explicit SamplePage (Ed& ed) : d (ed), wave (ed), pitch (ed, modeParam (ed.mode, M_SMPPITCH)), loop (ed, modeParam (ed.mode, M_SMPLOOP)), len (ed, modeParam (ed.mode, M_SMPFREE))
+    explicit SamplePage (Ed& ed) : d (ed), wave (ed), osc (ed.e.sampleOsc), pitch (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_PITCH))), loop (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_LOOP))), len (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_FREE)))
     {
         addAndMakeVisible (wave); addAndMakeVisible (pitch); addAndMakeVisible (loop); addAndMakeVisible (len);
-        for (auto [p, n] : std::initializer_list<std::pair<int, const char*>> { { M_SMPLVL, "Pegel" }, { M_OSCLVL, "Oszillator" }, { M_SMPTUNE, "Tune" }, { M_SMPROOT, "Grundton" }, { M_SMPSTART, "Start" } })
+        for (auto [p, n] : std::initializer_list<std::pair<int, const char*>> { { O (osc, O_LVL), "Pegel" }, { O (osc, O_TUNE), "Tune" }, { O (osc, O_FINE), "Fein" }, { O (osc, O_ROOT), "Grundton" }, { O (osc, O_START), "Start" } })
         {
             knobs.push_back (std::make_unique<Knob> (d, modeParam (d.mode, p), U (n)));
             addAndMakeVisible (*knobs.back());
         }
         styleButton (load); styleButton (clear);
         load.setButtonText (U ("Sample laden")); clear.setButtonText (U ("Sample entfernen"));
-        load.onClick = [this] { d.e.chooseSample(); };
-        clear.onClick = [this] { d.p.clearSample (d.mode); d.e.status = {}; };
+        load.onClick = [this] { d.e.chooseSample (osc); };
+        clear.onClick = [this] { d.p.clearSample (d.mode, osc); d.e.status = {}; };
+        for (int o = 0; o < NUM_OSCS; ++o)
+        {
+            auto b = std::make_unique<juce::TextButton> ("Oszillator " + String::charToString ((juce::juce_wchar) ('A' + o)));
+            styleButton (*b);
+            if (o == osc) { b->setColour (juce::TextButton::buttonColourId, d.acc); b->setColour (juce::TextButton::textColourOffId, theme::well); }
+            b->onClick = [this, o] { d.e.sampleOsc = o; d.e.status = {}; d.e.requestRebuild(); };
+            addAndMakeVisible (*b); oscTabs.push_back (std::move (b));
+        }
         addAndMakeVisible (load); addAndMakeVisible (clear);
     }
     void resized() override
     {
         auto b = getLocalBounds();
+        auto tabs = b.removeFromTop (32); b.removeFromTop (6);
+        for (auto& t : oscTabs) t->setBounds (tabs.removeFromLeft (150).withTrimmedRight (4));
         auto bottom = b.removeFromBottom (196); b.removeFromBottom (8);
         wave.setBounds (b);
         auto buttons = bottom.removeFromRight (190); buttons.removeFromTop (28);
@@ -1462,64 +1612,16 @@ public:
         g.drawText (U ("Loop"), 0, y0 + 64, 300, 20, juce::Justification::centredLeft, false);
         g.drawText (U ("Länge bestimmt"), 0, y0 + 124, 300, 20, juce::Justification::centredLeft, false);
         g.setColour (theme::dim); g.setFont (theme::font (13.0f));
-        const String hint = d.e.status.isNotEmpty() ? d.e.status : U ("Das Sample läuft durch Filter, Drive und FX. Es wird im Projekt und im Preset mitgespeichert.");
+        const String hint = d.e.status.isNotEmpty() ? d.e.status : U ("Jeder Oszillator hat sein eigenes Sample. Es läuft durch Filter, Drive und FX und wird im Projekt und im Preset mitgespeichert.");
         g.drawText (hint, 410, y0 + 150, getWidth() - 620, 40, juce::Justification::centredLeft, true);
     }
 private:
-    Ed& d; SampleWave wave; Strip pitch, loop, len;
+    Ed& d; SampleWave wave; int osc; Strip pitch, loop, len;
     std::vector<std::unique_ptr<Knob>> knobs; juce::TextButton load, clear;
+    std::vector<std::unique_ptr<juce::TextButton>> oscTabs;
 };
 
 // ---------------- Seite: Mod -----------------------------------------------
-class LfoView : public Ticking
-{
-public:
-    LfoView (Ed& ed, int index) : d (ed), lfo (index) {}
-    void tick() override { const float v = d.p.engine.sourceView[lfo].load (std::memory_order_relaxed); if (v != last) { last = v; repaint(); } }
-    void paint (Graphics& g) override
-    {
-        auto o = getLocalBounds().toFloat();
-        g.setColour (theme::well); g.fillRoundedRectangle (o, 6.0f);
-        auto b = o.reduced (6.0f);
-        const int s = (int) d.p.rawValue (lfoParam (lfo, LF_SHAPE));
-        Path p;
-        for (int i = 0; i <= 160; ++i)
-        {
-            const float t = (float) i / 160.0f, x = std::fmod (t * 2.0f, 1.0f); float y;
-            switch (s) { case 0: y = std::sin (6.2831853f * x); break; case 1: y = x < 0.25f ? 4 * x : x < 0.75f ? 2 - 4 * x : 4 * x - 4; break;
-                         case 2: y = 1 - 2 * x; break; case 3: y = x < 0.5f ? 1.0f : -1.0f; break;
-                         default: y = std::sin (std::floor (t * 12.0f) * 7.3f); break; }
-            const float px = b.getX() + t * b.getWidth(), py = b.getCentreY() - y * b.getHeight() * 0.44f;
-            if (i == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
-        }
-        g.setColour (d.acc); g.strokePath (p, juce::PathStrokeType (2.0f));
-        const float dy = b.getCentreY() - last * b.getHeight() * 0.44f;
-        g.setColour (theme::ink); g.fillRoundedRectangle (b.getRight() - 6, dy - 3, 6, 6, 3);
-    }
-private:
-    Ed& d; int lfo; float last = 2;
-};
-
-class EnvView : public Disp
-{
-public:
-    EnvView (Ed& ed, int index) : Disp (ed, { envParam (index, EV_ATT), envParam (index, EV_DEC), envParam (index, EV_SUS), envParam (index, EV_REL), envParam (index, EV_CURVE) }), env (index) {}
-    void draw (Graphics& g, Rectangle<float> b) override
-    {
-        const auto n = [&] (int k) { return d.p.param (envParam (env, k))->getValue(); };
-        const float a = n (EV_ATT) * 0.33f, de = a + n (EV_DEC) * 0.33f, su = n (EV_SUS), r = de + 0.1f + n (EV_REL) * 0.23f;
-        const float c = 0.6f + d.p.rawValue (envParam (env, EV_CURVE)) * 5.4f;
-        const auto X = [&] (float x) { return b.getX() + x * b.getWidth(); }; const auto Y = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
-        Path p; p.startNewSubPath (X (0), Y (0)); p.lineTo (X (a), Y (1));
-        for (int i = 1; i <= 50; ++i) { const float t = (float) i / 50.0f; p.lineTo (X (a + (de - a) * t), Y (su + (1 - su) * std::pow (1 - t, c))); }
-        p.lineTo (X (de + 0.1f), Y (su));
-        for (int i = 1; i <= 30; ++i) { const float t = (float) i / 30.0f; p.lineTo (X (de + 0.1f + (r - de - 0.1f) * t), Y (su * std::pow (1 - t, 3.0f))); }
-        fillUnder (g, p, b); stroke (g, p);
-    }
-private:
-    int env;
-};
-
 class ModRow : public Ticking
 {
 public:
@@ -1560,21 +1662,6 @@ class ModPage : public Ticking
 public:
     explicit ModPage (Ed& ed) : d (ed)
     {
-        for (int i = 0; i < NUM_LFOS; ++i)
-        {
-            auto p = std::make_unique<Panel> (d, "LFO " + String (i + 1));
-            auto* box = p->own (std::make_unique<LfoBox> (d, i)); p->fill = box;
-            p->knobAbs (lfoParam (i, LF_HZ), "Tempo");
-            addAndMakeVisible (*p); panels.push_back (std::move (p));
-        }
-        for (int i = 0; i < NUM_ENVS; ++i)
-        {
-            auto p = std::make_unique<Panel> (d, "Env " + String (i + 1));
-            p->fill = p->own (std::make_unique<EnvView> (d, i));
-            p->knobAbs (envParam (i, EV_ATT), "Attack"); p->knobAbs (envParam (i, EV_DEC), "Decay"); p->knobAbs (envParam (i, EV_SUS), "Sustain");
-            p->knobAbs (envParam (i, EV_REL), "Release"); p->knobAbs (envParam (i, EV_CURVE), "Kurve");
-            addAndMakeVisible (*p); panels.push_back (std::move (p));
-        }
         for (int m = 0; m < NUM_MODS; ++m)
             if ((int) d.p.rawValue (modSlot (m, MD_TARGET)) >= 0)
             {
@@ -1583,45 +1670,25 @@ public:
             }
         hash = signature();
     }
-    struct LfoBox : public Ticking
-    {
-        LfoBox (Ed& ed, int i) : view (ed, i), shape (ed, lfoParam (i, LF_SHAPE)), sync (ed, lfoParam (i, LF_SYNC)), div (ed, lfoParam (i, LF_DIV), 4), retrig (ed, lfoParam (i, LF_RETRIG))
-        {
-            for (juce::Component* c : { (juce::Component*) &view, (juce::Component*) &shape, (juce::Component*) &sync, (juce::Component*) &div, (juce::Component*) &retrig }) addAndMakeVisible (c);
-        }
-        void resized() override
-        {
-            auto b = getLocalBounds();
-            auto right = b.removeFromRight (168); b.removeFromRight (6);
-            shape.setBounds (b.removeFromBottom (24)); b.removeFromBottom (2); view.setBounds (b);
-            auto r = right.removeFromTop (24); sync.setBounds (r.removeFromLeft (82)); r.removeFromLeft (4); retrig.setBounds (r);
-            right.removeFromTop (3); div.setBounds (right);
-        }
-        LfoView view; Strip shape, sync, div, retrig;
-    };
     int signature() const { int h = 0; for (int m = 0; m < NUM_MODS; ++m) h = h * 31 + (int) d.p.rawValue (modSlot (m, MD_TARGET)) + 2; return h; }
-    void tick() override { Ticking::tick(); const int h = signature(); if (h != hash) { hash = h; d.e.requestRebuild(); } }
+    void tick() override { const int h = signature(); if (h != hash) { hash = h; d.e.requestRebuild(); } }
     void resized() override
     {
-        auto b = getLocalBounds();
-        const int mh = (b.getHeight() - 16) * 3 / 10;
-        const int w = (b.getWidth() - 16) / 3, h = (b.getHeight() - mh - 16) / 2;
-        for (int r = 0; r < 2; ++r)
-            for (int c = 0; c < 3; ++c)
-                panels[(size_t) (r * 3 + c)]->setBounds (b.getX() + c * (w + 8), b.getY() + r * (h + 8), w, h);
-        auto list = b.removeFromBottom (mh);
-        const int rowW = (list.getWidth() - 8) / 2, rowH = juce::jmin (26, list.getHeight() / 8);
+        auto list = getLocalBounds().withTrimmedTop (32);
+        const int rowW = (list.getWidth() - 8) / 2;
         for (int i = 0; i < (int) rows.size(); ++i)
-            rows[(size_t) i]->setBounds (list.getX() + (i / 8) * (rowW + 8), list.getY() + (i % 8) * rowH, rowW, rowH - 2);
+            rows[(size_t) i]->setBounds (list.getX() + (i / 8) * (rowW + 8), list.getY() + (i % 8) * 40, rowW, 34);
     }
     void paint (Graphics& g) override
     {
+        g.setColour (theme::ink); g.setFont (theme::font (16.0f, true));
+        g.drawText (U ("Verbindungen"), 0, 2, 300, 22, juce::Justification::centredLeft, false);
         if (! rows.empty()) return;
         g.setColour (theme::dim); g.setFont (theme::font (16.0f));
-        g.drawText (U ("Noch keine Verbindung. Zieh einen LFO oder eine Env aus der Leiste unten auf einen Regler."), getLocalBounds().removeFromBottom (120), juce::Justification::centred, false);
+        g.drawText (U ("Noch keine Verbindung. Zieh einen LFO oder eine Env aus der Leiste unten auf einen Regler."), getLocalBounds(), juce::Justification::centred, false);
     }
 private:
-    Ed& d; std::vector<std::unique_ptr<Panel>> panels; std::vector<std::unique_ptr<ModRow>> rows; int hash = 0;
+    Ed& d; std::vector<std::unique_ptr<ModRow>> rows; int hash = 0;
 };
 
 // ---------------- Seite: Presets und Designs ---------------------------------
@@ -1765,9 +1832,11 @@ public:
                 if (i == d.e.recipe) { b->setColour (juce::TextButton::buttonColourId, d.acc); b->setColour (juce::TextButton::textColourOffId, theme::well); }
                 recipeTabs.push_back (std::move (b));
             }
-            if (const auto* s = d.p.samples[d.mode].load())
+            int useOsc = -1;
+            for (int o = NUM_OSCS - 1; o >= 0; --o) if (d.p.samples[sampleSlot (d.mode, o)].load() != nullptr) useOsc = o;
+            if (useOsc >= 0)
             {
-                hasSample = true; report = analyzeSample (*s); advice = suggestSettings (d.mode, report);
+                hasSample = true; report = analyzeSample (*d.p.samples[sampleSlot (d.mode, useOsc)].load()); advice = suggestSettings (d.mode, report, useOsc);
                 tab (apply, U ("Vorschläge übernehmen"), [this]
                 {
                     for (const auto& e : advice.items)
@@ -2000,7 +2069,7 @@ TekkforgeEditor::TekkforgeEditor (TekkforgeProcessor& p) : AudioProcessorEditor 
     update->fill = [this] { return theme::accent ((int) proc.rawValue (G_MODE)); };
     update->text = [] { return theme::well; };
     addChildComponent (*update);
-    setSize (1280, 860);
+    setSize (1280, 960);
     rebuild();
     startTimerHz (30);
 }
@@ -2081,70 +2150,42 @@ void TekkforgeEditor::resized()
     if (page != nullptr) page->setBounds (b.reduced (10, 4));
 }
 
-void TekkforgeEditor::filesDropped (const juce::StringArray& files, int, int)
+void TekkforgeEditor::filesDropped (const juce::StringArray& files, int x, int y)
 {
-    if (! files.isEmpty()) loadSampleFile (juce::File (files[0]));
+    if (files.isEmpty()) return;
+    // Wird die Datei auf einem Oszillator abgelegt, landet sie genau dort
+    int osc = sampleOsc;
+    for (auto* c = getComponentAt (x, y); c != nullptr; c = c->getParentComponent())
+        if (auto* p = dynamic_cast<Panel*> (c); p != nullptr && p->oscIndex >= 0) { osc = p->oscIndex; break; }
+    loadSampleFile (juce::File (files[0]), osc);
 }
 
-void TekkforgeEditor::loadSampleFile (const juce::File& file)
+void TekkforgeEditor::loadSampleFile (const juce::File& file, int osc)
 {
     const int mode = (int) proc.rawValue (G_MODE);
     String msg;
-    if (proc.loadSample (mode, file, msg))
+    if (proc.loadSample (mode, osc, file, msg))
     {
-        // Damit sofort das Sample zu hoeren ist, gehen die eingebauten Klangteile auf null
-        for (int p : { M_OSCLVL, M_CLKLVL, M_SUBLVL })
+        const auto set = [this, mode] (int p, float real)
         {
             auto* x = proc.param (modeParam (mode, p));
-            x->beginChangeGesture(); x->setValueNotifyingHost (0.0f); x->endChangeGesture();
-        }
-        status = msg.isNotEmpty() ? msg : U ("Oszillator, Click und Sub stehen auf null. Dreh sie hoch, um sie dazuzumischen.");
+            x->beginChangeGesture(); x->setValueNotifyingHost (x->convertTo0to1 (real)); x->endChangeGesture();
+        };
+        set (O (osc, O_SRC), 1.0f);
+        if (proc.rawValue (modeParam (mode, O (osc, O_LVL))) <= 0.0f) set (O (osc, O_LVL), 1.0f);
+        status = msg.isNotEmpty() ? msg : U ("Sample geladen. Es läuft auf diesem Oszillator, die anderen bleiben aktiv.");
     }
     else status = msg;
-    showPage (1);
+    sampleOsc = osc;
+    requestRebuild();
 }
 
-void TekkforgeEditor::askRenderSound()
-{
-    const int mode = (int) proc.rawValue (G_MODE), last = proc.lastNote.load();
-    const int note = last >= 0 ? last : (modeIsMono (mode) ? 29 : 60);
-    auto* w = new juce::AlertWindow (U ("Sound fertig rendern"),
-        U ("Der aktuelle Sound wird mit allen Effekten auf Note ") + noteName (note) + U (" in ein Sample gerechnet. "
-           "Danach steht das ganze Plugin wieder auf Standard und nur dieses Sample bleibt im Modus ") + U (modeName (mode)) + U (".\n\n"
-           "Einstellungen und die anderen Modi sind dann weg. Möchtest du vorher ein Preset speichern?"),
-        juce::MessageBoxIconType::QuestionIcon, this);
-    w->addTextEditor ("name", proc.currentPreset.isNotEmpty() ? proc.currentPreset : U (modeName (mode)) + " " + noteName (note), U ("Presetname"));
-    w->addButton (U ("Speichern und rendern"), 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton (U ("Ohne Speichern rendern"), 2);
-    w->addButton (U ("Abbrechen"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([sp = SafePointer<TekkforgeEditor> (this), w, mode, note] (int choice)
-    {
-        std::unique_ptr<juce::AlertWindow> owner (w);
-        if (sp == nullptr || choice == 0) return;
-        auto& pr = sp->proc;
-        String msg;
-        auto data = pr.renderSound (note, msg);    // zuerst rendern: scheitert es, bleibt alles unveraendert
-        if (data == nullptr) { sp->status = msg; sp->requestRebuild(); return; }
-        if (choice == 1)
-        {
-            const auto base = juce::File::createLegalFileName (w->getTextEditorContents ("name").trim());
-            if (base.isEmpty()) { sp->status = U ("Gib dem Preset einen Namen. Es wurde nichts geändert."); sp->requestRebuild(); return; }
-            const auto file = pr.presetFolder().getChildFile (base + ".tkf").getNonexistentSibling (false);
-            if (! pr.savePresetFile (file)) { sp->status = U ("Speichern ist fehlgeschlagen. Es wurde nichts geändert."); sp->requestRebuild(); return; }
-        }
-        const auto seconds = (float) data->length() / data->rate;
-        pr.applyRendered (std::move (data), mode, note);
-        sp->status = U ("Fertig gerendert: ") + String (seconds, 2) + U (" s. Das Plugin steht auf Standard.");
-        sp->showPage (1);
-    }), false);
-}
-
-void TekkforgeEditor::chooseSample()
+void TekkforgeEditor::chooseSample (int osc)
 {
     chooser = std::make_unique<juce::FileChooser> (U ("Sample laden"), juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [sp = SafePointer<TekkforgeEditor> (this)] (const juce::FileChooser& c)
-                          { if (sp != nullptr && c.getResult().existsAsFile()) sp->loadSampleFile (c.getResult()); });
+                          [sp = SafePointer<TekkforgeEditor> (this), osc] (const juce::FileChooser& c)
+                          { if (sp != nullptr && c.getResult().existsAsFile()) sp->loadSampleFile (c.getResult(), osc); });
 }
 
 void TekkforgeEditor::chooseExport()

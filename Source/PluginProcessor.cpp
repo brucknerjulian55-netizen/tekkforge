@@ -59,7 +59,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout TekkforgeProcessor::makeLayo
 }
 
 TekkforgeProcessor::TekkforgeProcessor()
-    : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+    : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                                       .withInput ("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "TEKKFORGE", makeLayout())
 {
     const auto& table = params();
@@ -76,23 +77,23 @@ TekkforgeProcessor::TekkforgeProcessor()
     engine.modView = &modView;
     engine.samples = samples;
     for (auto& s : samples) s.store (nullptr);
-    liveSamples.resize (NUM_MODES);
+    liveSamples.resize (NUM_MODES * NUM_OSCS);
     formats.registerBasicFormats();
 }
 TekkforgeProcessor::~TekkforgeProcessor() { cancelPendingUpdate(); }
 
-void TekkforgeProcessor::installSample (int mode, std::unique_ptr<SampleData> data)
+void TekkforgeProcessor::installSample (int slot, std::unique_ptr<SampleData> data)
 {
     const auto now = juce::Time::getMillisecondCounter();
     oldSamples.erase (std::remove_if (oldSamples.begin(), oldSamples.end(), [now] (const Old& o) { return now - o.when > 5000; }), oldSamples.end());
-    samples[mode].store (data.get(), std::memory_order_release);
-    if (liveSamples[(size_t) mode] != nullptr) oldSamples.push_back ({ std::move (liveSamples[(size_t) mode]), now });
-    liveSamples[(size_t) mode] = std::move (data);
+    samples[slot].store (data.get(), std::memory_order_release);
+    if (liveSamples[(size_t) slot] != nullptr) oldSamples.push_back ({ std::move (liveSamples[(size_t) slot]), now });
+    liveSamples[(size_t) slot] = std::move (data);
     ++sampleVersion;
 }
-void TekkforgeProcessor::clearSample (int mode) { installSample (mode, nullptr); }
+void TekkforgeProcessor::clearSample (int mode, int osc) { installSample (sampleSlot (mode, osc), nullptr); }
 
-bool TekkforgeProcessor::loadSample (int mode, const juce::File& file, juce::String& message)
+bool TekkforgeProcessor::loadSample (int mode, int osc, const juce::File& file, juce::String& message)
 {
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
     if (reader == nullptr) { message = juce::String::fromUTF8 ("Diese Datei lässt sich nicht lesen. Nimm WAV, AIFF, FLAC oder OGG."); return false; }
@@ -105,7 +106,7 @@ bool TekkforgeProcessor::loadSample (int mode, const juce::File& file, juce::Str
     d->name = file.getFileName().toStdString();
     d->l.assign (b.getReadPointer (0), b.getReadPointer (0) + total);
     if (reader->numChannels > 1) d->r.assign (b.getReadPointer (1), b.getReadPointer (1) + total);
-    installSample (mode, std::move (d));
+    installSample (sampleSlot (mode, osc), std::move (d));
     message = reader->lengthInSamples > total ? juce::String::fromUTF8 ("Nur die ersten 30 Sekunden wurden geladen.") : juce::String();
     return true;
 }
@@ -200,7 +201,13 @@ void TekkforgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 {
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
-    buffer.clear();
+    // Sidechain-Eingang zuerst lesen, er liegt im selben Puffer wie der Ausgang
+    float side = 0;
+    if (auto* bus = getBus (true, 0); bus != nullptr && bus->isEnabled())
+        side = getBusBuffer (buffer, true, 0).getMagnitude (0, n);
+    engine.sideLevel.store (side, std::memory_order_relaxed);
+    auto output = getBusBuffer (buffer, false, 0);
+    output.clear();
     if (n > maxBlock) return;   // JUCE-Hosts halten die zugesagte Blockgroesse ein
 
     snapshot (values);
@@ -218,7 +225,7 @@ void TekkforgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     lastBpm.store (bpm, std::memory_order_relaxed);
     const int factor = 1 << quality;
     float* L; float* R;
-    juce::dsp::AudioBlock<float> outBlock (buffer);
+    juce::dsp::AudioBlock<float> outBlock (output);
     juce::dsp::AudioBlock<float> up = outBlock;
     if (quality > 0) up = os[quality]->processSamplesUp (outBlock);
     L = up.getChannelPointer (0); R = up.getChannelPointer (1);
@@ -242,7 +249,7 @@ void TekkforgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     render (n);
     if (quality > 0) os[quality]->processSamplesDown (outBlock);
 
-    auto* oL = buffer.getReadPointer (0); auto* oR = buffer.getReadPointer (1);
+    auto* oL = output.getReadPointer (0); auto* oR = output.getReadPointer (1);
     float pkL = 0, pkR = 0; int w = scopeWrite.load (std::memory_order_relaxed);
     for (int i = 0; i < n; ++i)
     {
@@ -270,11 +277,11 @@ std::unique_ptr<juce::XmlElement> TekkforgeProcessor::stateToXml()
 
     // Samples wandern mit in Projekt und Preset, die Originaldatei wird danach nicht mehr gebraucht
     juce::ValueTree smp ("SAMPLES");
-    for (int m = 0; m < NUM_MODES; ++m)
+    for (int m = 0; m < NUM_MODES * NUM_OSCS; ++m)
         if (const auto* d = liveSamples[(size_t) m].get())
         {
             juce::ValueTree e ("S");
-            e.setProperty ("mode", m, nullptr); e.setProperty ("rate", d->rate, nullptr);
+            e.setProperty ("slot", m, nullptr); e.setProperty ("rate", d->rate, nullptr);
             e.setProperty ("name", juce::String::fromUTF8 (d->name.c_str()), nullptr);
             e.setProperty ("l", juce::MemoryBlock (d->l.data(), d->l.size() * sizeof (float)).toBase64Encoding(), nullptr);
             if (! d->r.empty()) e.setProperty ("r", juce::MemoryBlock (d->r.data(), d->r.size() * sizeof (float)).toBase64Encoding(), nullptr);
@@ -298,7 +305,7 @@ void TekkforgeProcessor::stateFromXml (const juce::XmlElement& xml)
         }
         state.removeChild (c, nullptr);
     }
-    for (int m = 0; m < NUM_MODES; ++m) if (liveSamples[(size_t) m] != nullptr) clearSample (m);
+    for (int m = 0; m < NUM_MODES * NUM_OSCS; ++m) if (liveSamples[(size_t) m] != nullptr) installSample (m, nullptr);
     if (auto smp = state.getChildWithName ("SAMPLES"); smp.isValid())
     {
         for (auto e : smp)
@@ -315,7 +322,7 @@ void TekkforgeProcessor::stateFromXml (const juce::XmlElement& xml)
             };
             read (e.getProperty ("l"), d->l);
             if (e.hasProperty ("r")) read (e.getProperty ("r"), d->r);
-            installSample (juce::jlimit (0, NUM_MODES - 1, (int) e.getProperty ("mode")), std::move (d));
+            installSample (juce::jlimit (0, NUM_MODES * NUM_OSCS - 1, (int) e.getProperty ("slot")), std::move (d));
         }
         state.removeChild (smp, nullptr);
     }
@@ -395,8 +402,8 @@ std::unique_ptr<SampleData> TekkforgeProcessor::renderSound (int note, juce::Str
         if ((int) v[slotParam (s, S_TYPE)] == FX_DELAY && v[slotParam (s, S_ON)] > 0.5f)
             silenceNeeded = juce::jmax (silenceNeeded, fxReal (fxInfo (FX_DELAY)[0], v[slotParam (s, S_P1)]) * 0.001 + 0.1);
 
-    double noteLen = (double) (m[M_ATT] + m[M_HOLD] + m[M_DEC]) * 0.001;
-    if (m[M_GATE] > 0.5f && m[M_SUS] > 0.0f) noteLen += 0.5;
+    double noteLen = (double) (m[M_ATT] + m[M_LENGTH]) * 0.001;
+    if ((int) m[M_GATE] == 1 && m[M_SUS] > 0.0f) noteLen += 0.5;
 
     auto out = std::make_unique<SampleData>();
     out->rate = (float) rate;
@@ -451,7 +458,7 @@ std::unique_ptr<SampleData> TekkforgeProcessor::renderSound (int note, juce::Str
 void TekkforgeProcessor::applyRendered (std::unique_ptr<SampleData> data, int mode, int note)
 {
     resetToDefaults();
-    installSample (mode, std::move (data));
+    installSample (sampleSlot (mode, 0), std::move (data));
     for (const auto& f : frozenValues (mode, note))
     {
         auto* p = param (f.index);
@@ -462,7 +469,7 @@ void TekkforgeProcessor::applyRendered (std::unique_ptr<SampleData> data, int mo
 void TekkforgeProcessor::resetToDefaults()
 {
     for (int i = 0; i < NUM_PARAMS; ++i) { auto* p = param (i); p->setValueNotifyingHost (p->getDefaultValue()); }
-    for (int m = 0; m < NUM_MODES; ++m) clearSample (m);
+    for (int m = 0; m < NUM_MODES * NUM_OSCS; ++m) if (liveSamples[(size_t) m] != nullptr) installSample (m, nullptr);
     for (int l = 0; l < NUM_LANES; ++l) shapeLane (l, 0);
     currentPreset = {};
 }

@@ -19,9 +19,9 @@ inline std::vector<Recipe> recipesFor (int mode)
           u8"Die Linie aus dem Spektrogramm als Kurve nachzeichnen. Höher in der Kurve heißt höherer Cutoff.",
           u8"Mix und Pegel nach Gehör, danach einen Drive-Slot hinter den Filter für mehr Bass-Obertöne." } };
     const Recipe rhythm { u8"Rhythmischer Bass",
-        { u8"Sample laden. Spielart auf Gate, Sustain auf 1 und Sub-Pegel auf etwa 0,35 stellen.",
+        { u8"Sample laden. Spielart auf Notenlänge und Sub-Pegel auf etwa 0,35 stellen.",
           u8"Der Sub spielt die Note aus dem Piano Roll. Notiere dort die Bassnoten in Tonart des Tracks.",
-          u8"Seite Mod: LFO 1 auf Rechteck, Takt und 1/16 stellen, Neustart auf Frei.",
+          u8"Auf der Synth-Seite LFO 1 auf Rechteck, Takt und 1/16 stellen, Neustart auf Frei.",
           u8"LFO 1 aus der Leiste auf den Sub-Pegel ziehen. Menge auf der Seite Mod auf etwa +0,35 stellen.",
           u8"Andere Teiler ausprobieren. 1/8 groovt ruhiger, 1/16 treibt stärker.",
           u8"Im Spektrum prüfen: Der Sub sollte in der Zone Sub liegen und nicht gegen die Kick arbeiten." } };
@@ -29,12 +29,18 @@ inline std::vector<Recipe> recipesFor (int mode)
     {
         case KICKBASS: return {
             { u8"Sample zu Kick-Bass",
-              { u8"Sample in Tekkforge ziehen. Es ersetzt den Oszillator im Modus Kickbass.",
+              { u8"Sample auf einen Oszillator ziehen. Er schaltet dann auf Sample um.",
                 u8"Links die Messwerte prüfen und „Vorschläge übernehmen“ drücken.",
                 u8"Die empfohlene Note spielen. Klingt der Schwanz sauber, stimmt das Tuning.",
-                u8"Decay ans Tempo anpassen, bis der Schwanz vor der nächsten Kick endet.",
+                u8"Spielart Notenlänge nutzen oder den Regler Länge stellen, bis der Schwanz vor der nächsten Kick endet.",
                 u8"Drive und Sub nach Gehör nachregeln. Mono unter etwa 120 Hz halten." } },
-            rhythm, trace };
+            rhythm, trace,
+            { u8"Sidechain",
+              { u8"Auf der FX-Seite in einem Slot den Effekt Sidechain laden. Er gehört in den Bass, nicht in die Kick.",
+                u8"Am einfachsten ist die Quelle Takt: Der Bass duckt sich auf jeder Viertel.",
+                u8"Mit Bis Freq auf etwa 200 Hz wird nur der Tiefbass geduckt, der Rest bleibt laut.",
+                u8"Tiefe und Länge einstellen, bis Kick und Bass nicht mehr kollidieren.",
+                u8"Für echte Kick-Muster: Quelle Link wählen und in FL den Peak Controller der Kick auf Pegel linken." } } };
         case FULLKICK: return {
             { u8"Sample zur Kick machen",
               { u8"Sample in Tekkforge ziehen und „Vorschläge übernehmen“ drücken.",
@@ -47,7 +53,7 @@ inline std::vector<Recipe> recipesFor (int mode)
             { u8"Sample zu Topkick",
               { u8"Ein kurzes Sample mit klarem Anschlag laden, etwa Snare, Clap oder Kick.",
                 u8"„Vorschläge übernehmen“ drücken. Der Lowcut entfernt den Bass, die Hüllkurve kürzt.",
-                u8"Decay zwischen 20 und 80 ms einstellen.",
+                u8"Den Regler Länge zwischen 20 und 80 ms einstellen.",
                 u8"Zusammen mit der Kick hören und die Phase prüfen.",
                 u8"Mit Drive oder einem Clipper-Slot härter machen." } } };
         case MELO: return {
@@ -61,7 +67,7 @@ inline std::vector<Recipe> recipesFor (int mode)
             { u8"Sample zu Stab",
               { u8"Ein kurzes tonales Sample laden und „Vorschläge übernehmen“ drücken.",
                 u8"Im Synth-Tab den Akkord wählen, Moll passt oft gut zu Hardtekk.",
-                u8"Filter-Env und Decay kurz halten, damit der Stab Platz macht.",
+                u8"Filter-Env und Länge kurz halten, damit der Stab Platz macht.",
                 u8"Stabs zwischen die Kicks setzen." } },
             rhythm, trace };
     }

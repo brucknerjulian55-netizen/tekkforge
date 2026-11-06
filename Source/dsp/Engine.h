@@ -57,28 +57,33 @@ public:
     float vel = 1;
     uint64_t age = 0;
 
-    void start (int midiNote, int played, float velocity, int delaySamples, uint64_t order, unsigned seed, int unisonCount)
+    void start (int midiNote, int played, float velocity, int delaySamples, uint64_t order, unsigned seed, const float* p)
     {
         active = true; released = false; stolen = false;
         note = midiNote; playedNote = played; vel = velocity; age = order;
-        t = 0; tailCount = 0; smpPos = -1.0; smpDone = false; relSmp = 1; delay = delaySamples; relLevel = 1; lastEnv = 0; fade = 1; rng = seed | 1u;
+        t = 0; tailCount = 0; relSmp = 1; delay = delaySamples; relLevel = 1; lastEnv = 0; fade = 1; rng = seed | 1u;
         sub = 0; clkPh = 0; clkHp.reset(); toneL.reset(); toneR.reset(); lc[0].reset(); lc[1].reset();
         f[0].reset(); f[1].reset();
-        for (int i = 0; i < MAX_UNISON; ++i) ph[i] = unisonCount > 1 ? rand01() : 0.0f;
+        for (int o = 0; o < NUM_OSCS; ++o)
+        {
+            smpPos[o] = -1.0; smpDone[o] = false;
+            const bool spread = p[O (o, O_UNI)] > 1.5f;
+            for (int i = 0; i < MAX_UNISON; ++i) ph[o][i] = spread ? rand01() : 0.0f;
+        }
     }
     void release() { if (active && ! released) { released = true; relLevel = lastEnv; relSmp = 1; } }
     void steal() { stolen = true; }
 
-    void render (float* L, float* R, int n, const float* p, float sr, const SampleData* smp)
+    /** smp zeigt auf die Samples der drei Oszillatoren dieses Modus. */
+    void render (float* L, float* R, int n, const float* p, float sr, const SampleData* const* smp)
     {
-        const float wave = std::clamp (p[M_WAVE], 0.0f, 3.0f);
-        const int uni = std::clamp ((int) std::round (p[M_UNI]), 1, MAX_UNISON);
-        const float det = p[M_DETUNE], width = p[M_WIDTH];
         const float root = 440.0f * std::pow (2.0f, ((float) note - 69.0f + p[M_TUNE] + p[M_FINE] * 0.01f) / 12.0f);
         const float pT = p[M_PTIME] * 0.001f * sr, pAmt = p[M_PAMT], pC = 1.0f + p[M_PCURVE] * 9.0f;
-        const float tA = std::max (p[M_ATT], 0.2f) * 0.001f * sr, tH = p[M_HOLD] * 0.001f * sr, tD = p[M_DEC] * 0.001f * sr;
-        const bool gate = p[M_GATE] > 0.5f;
-        const float sus = gate ? p[M_SUS] : 0.0f, aC = 0.6f + p[M_ACURVE] * 5.4f;
+        // Laenge verteilt sich im Verhaeltnis von Hold und Decay
+        const float shapeSum = std::max (p[M_HOLD] + p[M_DEC], 1.0f), lenT = p[M_LENGTH] * 0.001f * sr;
+        const float tA = std::max (p[M_ATT], 0.2f) * 0.001f * sr, tH = lenT * p[M_HOLD] / shapeSum, tD = std::max (lenT * p[M_DEC] / shapeSum, 1.0f);
+        const int gateMode = (int) p[M_GATE];                 // 0 One-Shot, 1 Gate, 2 Notenlaenge
+        const float sus = gateMode == 2 ? 1.0f : gateMode == 1 ? p[M_SUS] : 0.0f, aC = 0.6f + p[M_ACURVE] * 5.4f;
         const float relC = std::exp (-6.9f / std::max (1.0f, p[M_REL] * 0.001f * sr));
         const float stealC = std::exp (-6.9f / (0.003f * sr));
         const int ftype = (int) p[M_FTYPE];
@@ -87,37 +92,56 @@ public:
         const float drv = p[M_DRV], dGain = std::pow (10.0f, drv * 40.0f / 20.0f), dComp = 1.0f / (1.0f + 0.9f * drv * drv);
         const int dT = (int) p[M_DRVTYPE];
         const float gain = dbToGain (p[M_LEVEL]) * (1.0f - p[M_VEL] * (1.0f - vel));
-        const float uniNorm = 1.0f / std::sqrt ((float) uni);
-        const float oscL = p[M_OSCLVL], smpL = smp != nullptr ? p[M_SMPLVL] : 0.0f;
-        const int smpMode = (int) p[M_SMPPITCH], smpLen = smp != nullptr ? smp->length() : 0;
-        const bool smpLoop = p[M_SMPLOOP] > 0.5f, smpFree = smp != nullptr && p[M_SMPFREE] > 0.5f && ! smpLoop;
-        const double smpStart = (double) std::clamp (p[M_SMPSTART], 0.0f, 0.999f) * (double) smpLen;
-        double smpBase = 0;
-        if (smp != nullptr)
-        {
-            const float st = p[M_SMPTUNE] + (smpMode > 0 ? (float) note - p[M_SMPROOT] + p[M_TUNE] + p[M_FINE] * 0.01f : 0.0f);
-            smpBase = (double) smp->rate / (double) sr * std::pow (2.0, (double) st / 12.0);
-            if (smpPos < 0) smpPos = smpStart;
-        }
 
         clkHp.set (clkT * 0.5f, sr);
         toneL.set (p[M_DRVTONE], sr); toneR.set (p[M_DRVTONE], sr);
         lc[0].set (p[M_LOWCUT], sr); lc[1].set (p[M_LOWCUT], sr);
 
-        float detMul[MAX_UNISON], panL[MAX_UNISON], panR[MAX_UNISON];
-        for (int u = 0; u < uni; ++u)
+        // Einstellungen je Oszillator
+        struct Osc
         {
-            const float x = uni > 1 ? 2.0f * (float) u / (float) (uni - 1) - 1.0f : 0.0f;
-            detMul[u] = std::pow (2.0f, x * det / 1200.0f);
-            const float pan = x * width;
-            panL[u] = std::sqrt (0.5f * (1.0f - pan)) * 1.4142f; panR[u] = std::sqrt (0.5f * (1.0f + pan)) * 1.4142f;
+            const SampleData* s = nullptr; float lvl = 0, wave = 0, mul = 1, norm = 1; int uni = 1;
+            float det[MAX_UNISON], pl[MAX_UNISON], pr[MAX_UNISON];
+            double base = 0, start = 0; int mode = 0, len = 0; bool loop = false, free = false;
+        } os[NUM_OSCS];
+        bool anyFree = false;
+        for (int o = 0; o < NUM_OSCS; ++o)
+        {
+            auto& c = os[o];
+            const float* q = p + O (o, 0);
+            c.lvl = q[O_LVL];
+            if (c.lvl <= 0.0f) continue;
+            c.mul = std::pow (2.0f, (q[O_TUNE] + q[O_FINE] * 0.01f) / 12.0f);
+            if (q[O_SRC] > 0.5f)
+            {
+                c.s = smp != nullptr ? smp[o] : nullptr;
+                if (c.s == nullptr || c.s->length() < 2) { c.lvl = 0; continue; }
+                c.mode = (int) q[O_PITCH]; c.len = c.s->length();
+                c.loop = q[O_LOOP] > 0.5f; c.free = q[O_FREE] > 0.5f && ! c.loop;
+                c.start = (double) std::clamp (q[O_START], 0.0f, 0.999f) * (double) c.len;
+                const float st = q[O_TUNE] + q[O_FINE] * 0.01f + (c.mode > 0 ? (float) note - q[O_ROOT] + p[M_TUNE] + p[M_FINE] * 0.01f : 0.0f);
+                c.base = (double) c.s->rate / (double) sr * std::pow (2.0, (double) st / 12.0);
+                if (smpPos[o] < 0) smpPos[o] = c.start;
+                anyFree = anyFree || (c.free && ! smpDone[o]);
+                continue;
+            }
+            c.wave = std::clamp (q[O_WAVE], 0.0f, 3.0f);
+            c.uni = std::clamp ((int) std::round (q[O_UNI]), 1, MAX_UNISON);
+            c.norm = 1.0f / std::sqrt ((float) c.uni);
+            for (int u = 0; u < c.uni; ++u)
+            {
+                const float x = c.uni > 1 ? 2.0f * (float) u / (float) (c.uni - 1) - 1.0f : 0.0f;
+                c.det[u] = std::pow (2.0f, x * q[O_DETUNE] / 1200.0f);
+                const float pan = x * q[O_WIDTH];
+                c.pl[u] = std::sqrt (0.5f * (1.0f - pan)) * 1.4142f; c.pr[u] = std::sqrt (0.5f * (1.0f + pan)) * 1.4142f;
+            }
         }
 
         for (int i = 0; i < n; ++i)
         {
             if (delay > 0) { --delay; continue; }
 
-            // Filter-Hullkurve wird alle 16 Samples neu gerechnet
+            // Filter-Huellkurve wird alle 16 Samples neu gerechnet
             if ((t & 15) == 0)
             {
                 const float fe = std::exp (-t / std::max (1.0f, p[M_FDEC] * 0.001f * sr));
@@ -141,33 +165,40 @@ public:
             // Tonhoehe
             float semis = 0;
             if (pAmt != 0.0f && tf < pT) semis = pAmt * std::pow (1.0f - tf / pT, pC);
-            const float freq = root * (semis != 0.0f ? std::pow (2.0f, semis / 12.0f) : 1.0f);
+            const float bend = semis != 0.0f ? std::pow (2.0f, semis / 12.0f) : 1.0f;
+            const float freq = root * bend;
 
-            // Oszillatoren
+            // Drei Oszillatoren, jeder spielt Welle oder Sample
             float l = 0, r = 0;
-            for (int u = 0; u < uni; ++u)
+            for (int o = 0; o < NUM_OSCS; ++o)
             {
-                const float dt = std::min (freq * detMul[u] / sr, 0.49f);
-                const float s = morphOsc (ph[u], dt, wave);
-                ph[u] += dt; if (ph[u] >= 1.0f) ph[u] -= 1.0f;
-                l += s * panL[u]; r += s * panR[u];
-            }
-            l *= uniNorm * oscL * env; r *= uniNorm * oscL * env;
-
-            // Sample laeuft durch Filter und Drive wie der Oszillator
-            if (smpL > 0.0f && ! smpDone)
-            {
-                const int a = (int) smpPos, b = a + 1 < smpLen ? a + 1 : (smpLoop ? 0 : a);
-                const float fr = (float) (smpPos - (double) a);
-                const float sl = smp->l[(size_t) a] + (smp->l[(size_t) b] - smp->l[(size_t) a]) * fr;
-                const float sr2 = smp->r.empty() ? sl : smp->r[(size_t) a] + (smp->r[(size_t) b] - smp->r[(size_t) a]) * fr;
-                const float g = smpL * (smpFree ? relSmp : env);
-                l += sl * g; r += sr2 * g;
-                smpPos += smpBase * (smpMode == 2 ? (double) (freq / root) : 1.0);
-                if (smpPos >= (double) smpLen)
+                auto& c = os[o];
+                if (c.lvl <= 0.0f) continue;
+                if (c.s != nullptr)
                 {
-                    if (smpLoop) smpPos = smpStart + std::fmod (smpPos - (double) smpLen, std::max (1.0, (double) smpLen - smpStart));
-                    else smpDone = true;
+                    if (smpDone[o]) continue;
+                    const auto& s = *c.s;
+                    const int a = (int) smpPos[o], b = a + 1 < c.len ? a + 1 : (c.loop ? 0 : a);
+                    const float fr = (float) (smpPos[o] - (double) a);
+                    const float sl = s.l[(size_t) a] + (s.l[(size_t) b] - s.l[(size_t) a]) * fr;
+                    const float sr2 = s.r.empty() ? sl : s.r[(size_t) a] + (s.r[(size_t) b] - s.r[(size_t) a]) * fr;
+                    const float g = c.lvl * (c.free ? relSmp : env);
+                    l += sl * g; r += sr2 * g;
+                    smpPos[o] += c.base * (c.mode == 2 ? (double) bend : 1.0);
+                    if (smpPos[o] >= (double) c.len)
+                    {
+                        if (c.loop) smpPos[o] = c.start + std::fmod (smpPos[o] - (double) c.len, std::max (1.0, (double) c.len - c.start));
+                        else smpDone[o] = true;
+                    }
+                    continue;
+                }
+                const float hz = freq * c.mul, g = c.lvl * c.norm * env;
+                for (int u = 0; u < c.uni; ++u)
+                {
+                    const float dt = std::min (hz * c.det[u] / sr, 0.49f);
+                    const float s = morphOsc (ph[o][u], dt, c.wave);
+                    ph[o][u] += dt; if (ph[o][u] >= 1.0f) ph[o][u] -= 1.0f;
+                    l += s * c.pl[u] * g; r += s * c.pr[u] * g;
                 }
             }
             if (released) relSmp *= relC;
@@ -178,6 +209,7 @@ public:
                 f[0].tick (l, lo, hi, ba); l = ftype == 0 ? lo : ftype == 1 ? hi : ba;
                 f[1].tick (r, lo, hi, ba); r = ftype == 0 ? lo : ftype == 1 ? hi : ba;
             }
+
             // Click-Layer
             if (clkL > 0.0f && tf < clkTau * 7.0f)
             {
@@ -210,7 +242,8 @@ public:
             ++t;
 
             bool ended = released ? relLevel < 0.0003f : (sus <= 0.0f && tf >= tA + tH + tD);
-            if (smpFree && ! smpDone && relSmp > 0.0003f && (smpL > 0.0f)) ended = false;
+            if (ended && relSmp > 0.0003f)
+                for (int o = 0; o < NUM_OSCS; ++o) if (os[o].free && ! smpDone[o]) ended = false;
             if (ended) { tailCount += 1; if (tailCount > (int) (0.05f * sr)) { active = false; tailCount = 0; return; } }
         }
     }
@@ -226,9 +259,9 @@ private:
     };
     float rand01() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (float) (rng & 0xffffff) / 16777216.0f; }
 
-    float ph[MAX_UNISON] {}, sub = 0, clkPh = 0, relLevel = 1, lastEnv = 0, fade = 1, relSmp = 1;
-    double smpPos = -1.0;
-    bool smpDone = false;
+    float ph[NUM_OSCS][MAX_UNISON] {}, sub = 0, clkPh = 0, relLevel = 1, lastEnv = 0, fade = 1, relSmp = 1;
+    double smpPos[NUM_OSCS] {};
+    bool smpDone[NUM_OSCS] {};
     int t = 0, delay = 0, tailCount = 0;
     unsigned rng = 1;
     OnePole clkHp, toneL, toneR;
@@ -241,7 +274,8 @@ class Engine
 public:
     std::array<std::array<std::atomic<float>, LANE_POINTS>, NUM_LANES>* curves = nullptr;
     std::array<std::atomic<float>, NUM_PARAMS>* modView = nullptr;     // aktueller Wert 0..1 inkl. Automation (fuer die Knobs)
-    const std::atomic<const SampleData*>* samples = nullptr;           // ein Eintrag je Modus
+    const std::atomic<const SampleData*>* samples = nullptr;           // sampleSlot (Modus, Oszillator)
+    std::atomic<float> sideLevel { 0.0f };                             // Pegel am Sidechain-Eingang
     std::atomic<float> lanePos[NUM_LANES];
     std::atomic<float> sourceView[NUM_SOURCES];                        // aktueller Wert jeder Quelle
 
@@ -278,7 +312,6 @@ public:
 
         int iv[5];
         const int count = modeIsMono (mode) ? (iv[0] = 0, 1) : chordIntervals ((int) p[M_CHORD], iv);
-        const int uni = (int) std::round (p[M_UNI]);
         for (int k = 0; k < count; ++k)
         {
             Voice* slot = nullptr;
@@ -288,10 +321,10 @@ public:
                 slot = &voices[0];
                 for (auto& v : voices) if (v.age < slot->age) slot = &v;
             }
-            slot->start (note + iv[k], note, vel, (int) ((float) k * p[M_STRUM] * 0.001f * sr), ++order, seed += 0x9e3779b9u, uni);
+            slot->start (note + iv[k], note, vel, (int) ((float) k * p[M_STRUM] * 0.001f * sr), ++order, seed += 0x9e3779b9u, p);
         }
         for (int l = 0; l < NUM_LANES; ++l) pos[l] = 0;
-        ++held;
+        ++held; ++fxCtx.notes;
         for (int i = 0; i < NUM_ENVS; ++i) { envTime[i] = 0; envRel[i] = false; envStart[i] = envLevel[i]; }
         for (int i = 0; i < NUM_LFOS; ++i)
             if (values[lfoParam (i, LF_RETRIG)] > 0.5f) { lfoPhase[i] = 0; lfoHeld[i] = 2.0f * rand01() - 1.0f; lfoLast[i] = 0; }
@@ -326,9 +359,16 @@ public:
             applyLanes (values, c, bpm, ppq < 0 ? -1.0 : ppq + (double) done / sr * bpm / 60.0);
 
             const float* mp = cur + modeParam (mode, 0);
-            const SampleData* smp = samples != nullptr ? samples[mode].load (std::memory_order_acquire) : nullptr;
-            if (smp != nullptr && smp->length() < 2) smp = nullptr;
+            const SampleData* smp[NUM_OSCS] { nullptr, nullptr, nullptr };
+            if (samples != nullptr)
+                for (int o = 0; o < NUM_OSCS; ++o) smp[o] = samples[sampleSlot (mode, o)].load (std::memory_order_acquire);
             for (auto& v : voices) if (v.active) v.render (L + done, R + done, c, mp, sr, smp);
+
+            // Takt fuer den Sidechain: laeuft auch bei gestopptem Transport weiter
+            freePpq += (double) c / sr * bpm / 60.0;
+            fxCtx.ppq = ppq >= 0 ? ppq + (double) done / sr * bpm / 60.0 : freePpq;
+            fxCtx.sideLevel = sideLevel.load (std::memory_order_relaxed);
+            for (auto& x : slots) x.ctx = &fxCtx;
             for (int s = 0; s < NUM_SLOTS; ++s) slots[(size_t) s].process (L + done, R + done, c, cur + slotParam (s, 0));
 
             const float target = dbToGain (cur[G_MASTER]), step = (target - gainNow) / (float) c;
@@ -452,6 +492,8 @@ private:
     float cur[NUM_PARAMS] {};
     double pos[NUM_LANES] {};
     int lastMode = -1, numTouched = 0, held = 0;
+    FxContext fxCtx;
+    double freePpq = 0;
     int touched[NUM_LANES + NUM_MODS] {};
     float source[NUM_SOURCES] {}, envLevel[NUM_ENVS] {}, envTime[NUM_ENVS] {}, envStart[NUM_ENVS] {}, lfoHeld[NUM_LFOS] {};
     bool envRel[NUM_ENVS] { true, true, true };

@@ -56,7 +56,7 @@ int main()
     // Stimmung: Kick-Schwanz F1 muss 43.65 Hz treffen (Nulldurchgaenge im Schwanz, ohne Click und Drive)
     {
         auto v = defaults(); v[G_MODE] = FULLKICK;
-        v[modeParam (FULLKICK, M_DRV)] = 0; v[modeParam (FULLKICK, M_CLKLVL)] = 0; v[modeParam (FULLKICK, M_DEC)] = 900; v[modeParam (FULLKICK, M_LOWCUT)] = 20;
+        v[modeParam (FULLKICK, M_DRV)] = 0; v[modeParam (FULLKICK, M_CLKLVL)] = 0; v[modeParam (FULLKICK, M_DEC)] = 900; v[modeParam (FULLKICK, M_LENGTH)] = 940; v[modeParam (FULLKICK, M_LOWCUT)] = 20;
         eng->reset(); std::vector<float> L, R;
         render (*eng, v, 29, 1.0f, 1.0f, sr, L, R);
         const size_t a = (size_t) (0.15f * sr), b = (size_t) (0.7f * sr);
@@ -111,11 +111,11 @@ int main()
     {
         SampleData sd; sd.rate = 44100; sd.l.resize (44100);
         for (int i = 0; i < 44100; ++i) sd.l[(size_t) i] = 0.5f * std::sin (2 * kPi * 440.0f * (float) i / 44100.0f);
-        std::atomic<const SampleData*> slots[NUM_MODES]; for (auto& x : slots) x.store (&sd);
+        std::atomic<const SampleData*> slots[NUM_MODES * NUM_OSCS]; for (auto& x : slots) x.store (&sd);
         eng->curves = nullptr; eng->modView = nullptr; eng->samples = slots;
         auto v = defaults(); v[G_MODE] = MELO;
         const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (MELO, p)]; };
-        M (M_OSCLVL) = 0; M (M_SMPROOT) = 69; M (M_SMPPITCH) = 1; M (M_SMPFREE) = 1; M (M_CHORD) = 0; M (M_LOWCUT) = 20;
+        M (O (0, O_SRC)) = 1; M (O (0, O_ROOT)) = 69; M (O (0, O_PITCH)) = 1; M (O (0, O_FREE)) = 1; M (M_CHORD) = 0; M (M_LOWCUT) = 20;
         M (M_CUT) = 20000; M (M_FENV) = 0; M (M_DRV) = 0; M (M_LEVEL) = 0; v[G_LIMIT] = 0;
         eng->reset(); std::vector<float> L, R;
         render (*eng, v, 81, 0.8f, 0.1f, sr, L, R);
@@ -133,8 +133,8 @@ int main()
     {
         auto v = defaults(); v[G_MODE] = KICKBASS;
         const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (KICKBASS, p)]; };
-        M (M_PAMT) = 0; M (M_DRV) = 0; M (M_CLKLVL) = 0; M (M_SUBLVL) = 0; M (M_WAVE) = 0; M (M_CUT) = 20000; M (M_GATE) = 0;
-        M (M_HOLD) = 900; M (M_DEC) = 50;
+        M (M_PAMT) = 0; M (M_DRV) = 0; M (M_CLKLVL) = 0; M (M_SUBLVL) = 0; M (O (0, O_WAVE)) = 0; M (M_CUT) = 20000; M (M_GATE) = 0;
+        M (M_HOLD) = 900; M (M_DEC) = 50; M (M_LENGTH) = 950;
         v[(size_t) modSlot (0, MD_SOURCE)] = NUM_LFOS; v[(size_t) modSlot (0, MD_TARGET)] = (float) modeParam (KICKBASS, M_TUNE); v[(size_t) modSlot (0, MD_AMOUNT)] = 0.5f;
         v[(size_t) envParam (0, EV_DEC)] = 300;
         eng->reset(); std::vector<float> L, R;
@@ -163,7 +163,7 @@ int main()
         eng->reset(); std::vector<float> L, R;
         render (*eng, v, note, 1.2f, 0.6f, sr, L, R);
         SampleData sd; sd.rate = sr; sd.l = L; sd.r = R;
-        std::atomic<const SampleData*> slots[NUM_MODES]; for (auto& x : slots) x.store (&sd);
+        std::atomic<const SampleData*> slots[NUM_MODES * NUM_OSCS]; for (auto& x : slots) x.store (&sd);
         eng->samples = slots;
         auto f = defaults();
         for (const auto& e : frozenValues (m, note)) f[(size_t) e.index] = e.value;
@@ -177,6 +177,72 @@ int main()
         if (db > -80) ++fails;
         eng->samples = nullptr;
     }
+    // Laenge: Der Regler bestimmt die Dauer, Notenlaenge folgt der gespielten Note
+    {
+        auto v = defaults(); v[G_MODE] = KICKBASS;
+        const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (KICKBASS, p)]; };
+        const auto measure = [&] (float noteLen)
+        {
+            eng->reset(); std::vector<float> L, R;
+            render (*eng, v, 33, 2.0f, noteLen, sr, L, R);
+            size_t last = 0; for (size_t i = 0; i < L.size(); ++i) if (std::fabs (L[i]) > 0.002f) last = i;
+            return (float) last / sr * 1000;
+        };
+        M (M_REL) = 10; M (M_CLKLVL) = 0;
+        M (M_GATE) = 2;
+        const float a = measure (0.1f), b = measure (1.0f);
+        M (M_GATE) = 0; M (M_LENGTH) = 800;
+        const float c = measure (0.1f);
+        M (M_LENGTH) = 200;
+        const float d = measure (0.1f);
+        std::printf ("Bass-Laenge: Note 100 ms = %.0f ms, Note 1000 ms = %.0f ms, Regler 800 = %.0f ms, Regler 200 = %.0f ms\n", a, b, c, d);
+        if (a < 95 || a > 150 || b < 990 || b > 1050 || c < 600 || c > 850 || d < 150 || d > 220) ++fails;
+    }
+
+    // Drei Oszillatoren: Osz B eine Oktave hoeher muss als 2. Teilton erscheinen, Osz C als Sample
+    {
+        const auto level = [&] (const std::vector<float>& x, float hz)
+        {
+            double re = 0, im = 0; size_t a = (size_t) (0.1f * sr), b = (size_t) (0.4f * sr);
+            for (size_t i = a; i < b; ++i) { const double w = 6.283185307 * hz * (double) i / sr; re += x[i] * std::cos (w); im += x[i] * std::sin (w); }
+            return 2.0 * std::sqrt (re * re + im * im) / (double) (b - a);
+        };
+        SampleData sd; sd.rate = 44100; sd.l.resize (44100);
+        for (int i = 0; i < 44100; ++i) sd.l[(size_t) i] = 0.6f * std::sin (2 * kPi * 1000.0f * (float) i / 44100.0f);
+        std::atomic<const SampleData*> slots[NUM_MODES * NUM_OSCS]; for (auto& x : slots) x.store (nullptr);
+        slots[sampleSlot (MELO, 2)].store (&sd);
+        eng->samples = slots;
+        auto v = defaults(); v[G_MODE] = MELO;
+        const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (MELO, p)]; };
+        M (M_FTYPE) = 3; M (M_LOWCUT) = 20; M (M_DRV) = 0; M (M_LEVEL) = 0; M (M_GATE) = 2; M (M_VEL) = 0; v[G_LIMIT] = 0;
+        M (O (0, O_WAVE)) = 0; M (O (0, O_UNI)) = 1;
+        M (O (1, O_LVL)) = 0.5f; M (O (1, O_WAVE)) = 0; M (O (1, O_TUNE)) = 12; M (O (1, O_UNI)) = 1;
+        M (O (2, O_LVL)) = 0.8f; M (O (2, O_SRC)) = 1; M (O (2, O_PITCH)) = 0; M (O (2, O_FREE)) = 1;
+        eng->reset(); std::vector<float> L, R;
+        render (*eng, v, 57, 0.6f, 0.6f, sr, L, R);
+        const double a = level (L, 220), b = level (L, 440), c = level (L, 1000);
+        std::printf ("Oszillatoren: A 220 Hz %.2f, B 440 Hz %.2f, C Sample 1 kHz %.2f\n", a, b, c);
+        if (std::fabs (a - 1.0) > 0.1 || std::fabs (b - 0.5) > 0.1 || std::fabs (c - 0.48) > 0.08) ++fails;
+        eng->samples = nullptr;
+    }
+
+    // Sidechain: Pegel muss nach jedem Beat einbrechen, nur unterhalb der Trennfrequenz
+    {
+        auto v = defaults(); v[G_MODE] = KICKBASS; v[G_LIMIT] = 0;
+        const auto M = [&] (int p) -> float& { return v[(size_t) modeParam (KICKBASS, p)]; };
+        M (M_CLKLVL) = 0; M (M_DRV) = 0; M (M_SUBLVL) = 0; M (M_PAMT) = 0; M (M_FTYPE) = 3; M (M_GATE) = 2; M (O (0, O_WAVE)) = 0;
+        v[(size_t) slotParam (0, S_TYPE)] = FX_SIDECHAIN; v[(size_t) slotParam (0, S_MIX)] = 1;
+        for (int k = 0; k < FX_PARAMS; ++k) v[(size_t) slotParam (0, S_P1 + k)] = fxNorm (fxInfo (FX_SIDECHAIN)[k], fxInfo (FX_SIDECHAIN)[k].def);
+        eng->reset(); eng->noteOn (45, 1, v.data());
+        std::vector<float> L ((size_t) sr, 0.0f), R ((size_t) sr, 0.0f);
+        const double bpm = 120;
+        for (int i = 0; i + 256 <= (int) sr; i += 256) eng->process (L.data() + i, R.data() + i, 256, v.data(), bpm, (double) i / sr * bpm / 60.0);
+        const auto peak = [&] (float a, float b) { float p = 0; for (size_t i = (size_t) (a * sr); i < (size_t) (b * sr); ++i) p = std::max (p, std::fabs (L[i])); return p; };
+        const float duck = peak (0.505f, 0.53f), free = peak (0.72f, 0.75f);
+        std::printf ("Sidechain: direkt nach dem Beat %.3f, vor dem naechsten %.3f\n", duck, free);
+        if (duck > free * 0.35f) ++fails;
+    }
+
     // Analyse: Grundton, Noise und Vorschlaege
     {
         const auto make = [] (int kind)

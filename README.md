@@ -19,16 +19,18 @@ Multisynth als VST3 für FL Studio, mit fünf Modi: Melo One-Shot, Stab, Topkick
 ## Bedienung
 
 - **Modus-Knöpfe oben:** Jeder Modus merkt sich eigene Einstellungen. FX und Auto gelten für alle Modi.
-- **Synth:** Alle Regler sind drehbar, Doppelklick setzt sie zurück. In den Anzeigen lassen sich die Kurven direkt ziehen.
+- **Synth:** Alles Wichtige liegt auf einer Seite: Oszillator A, B und C, Sub, Hüllkurven, Filter, Drive, LFOs und Envs. Alle Regler sind drehbar, Doppelklick setzt sie zurück. In den Anzeigen lassen sich die Kurven direkt ziehen.
+- **Oszillatoren:** Jeder der drei spielt eine Welle oder ein Sample. Ziehe eine Audiodatei direkt auf den Oszillator. Der Sub hat einen eigenen Lautstärke-Regler.
+- **Länge:** Der Regler Länge bestimmt die Dauer des Sounds. Bei Spielart Notenlänge entscheidet die Note im Piano Roll, das ist für Bass meist am einfachsten.
+- **Sidechain:** Auf der FX-Seite gibt es den Effekt Sidechain. Lade ihn im Bass. Quelle Takt duckt auf jeder Viertel, Note bei jeder Note dieser Instanz, Link über den Regler Pegel (zum Beispiel mit dem Peak Controller in FL) und Audio über den Sidechain-Eingang. Bis Freq begrenzt das Ducken auf die Bässe.
   Bei der Pitch-Kurve ändert das Mausrad die Krümmung.
 - **FX:** Acht Slots in Reihenfolge von oben nach unten. Jeder Effekt darf mehrfach vorkommen.
   Slot anklicken, Effekt wählen. Reihen lassen sich ziehen, der Punkt rechts schaltet den Slot an oder aus.
 - **Auto:** Vier interne Automationen. Kurve zeichnen, Ziel wählen oder „Ziel per Klick“ nutzen. Ein weißer Bogen am Regler zeigt die Bewegung.
 - **Guide:** Frequenzbereiche und Prüfliste des aktuellen Modus. Die Zonen sind auch im Spektrum auf der Synth-Seite sichtbar.
-- **Sample:** Audiodatei ins Fenster ziehen oder laden. Jeder Modus hat ein eigenes Sample bis 30 Sekunden. Es läuft durch Filter, Drive und FX.
-  Beim Laden gehen Oszillator, Click und Sub auf null, damit du es sofort pur hörst.
-- **Mod:** Drei LFOs und drei Envs. Zieh eine Quelle aus der Leiste über der Tastatur auf einen Regler, zum Beispiel Env 1 auf Tune für Pitch.
-  Die Stärke stellst du auf der Mod-Seite ein. Rechtsklick auf den Regler entfernt eine Verbindung.
+- **Sample:** Zeigt das Sample des gewählten Oszillators groß, mit Spektrogramm, Tonhöhe, Loop und Startpunkt. Ein Sample darf bis 30 Sekunden lang sein.
+- **LFOs und Envs:** Drei LFOs und drei Envs liegen auf der Synth-Seite. Zieh eine Quelle aus der Leiste über der Tastatur auf einen Regler, zum Beispiel Env 1 auf Tune für Pitch.
+  Die Stärke stellst du auf der Seite Mod ein, dort stehen alle Verbindungen. Rechtsklick auf den Regler entfernt eine Verbindung.
   LFOs und Envs laufen gemeinsam für alle Stimmen, nicht pro Stimme.
 - **Presets:** „In Tekkforge speichern“ legt das Preset in deiner internen Liste ab, die in jedem Projekt verfügbar ist.
   „Als Datei exportieren“ schreibt eine `.tkf`-Datei an einen beliebigen Ort. Samples stecken mit drin.
@@ -51,15 +53,13 @@ Eigene Kette: Drive, Wavefold, Crush und danach ein eingebauter Phaser mit eigen
 
 ## Updates
 
-Beim Öffnen fragt das Plugin bei GitHub nach der neuesten Version von `brucknerjulian55-netizen/tekkforge`. Dabei wird nichts installiert und es werden keine Projektdaten gesendet. Ist eine neuere Version da, erscheint ein Hinweis, der die Download-Seite öffnet. Ohne Internet oder ohne Repository bleibt der Hinweis weg.
+Ab dieser Version gibt es einen Installer. Lade einmal `Tekkforge-Setup.exe` aus den Releases von `brucknerjulian55-netizen/tekkforge` und starte ihn. Er legt das Plugin im VST3-Ordner ab.
 
-So veröffentlichst du ein Update:
+Danach läuft jedes Update so: Das Plugin zeigt **Update installieren**, du klickst darauf und bestätigst. Es lädt den Installer, der FL Studio zum Schließen auffordert und das Plugin ersetzt. Projekte und Presets bleiben erhalten. Das Plugin prüft beim Öffnen nur die Versionsnummer bei GitHub und sendet keine Projektdaten.
 
-1. In `CMakeLists.txt` die Versionsnummer erhöhen, zum Beispiel `VERSION 0.2.0`.
-2. Das öffentliche Repository `tekkforge` auf GitHub anlegen, falls es noch fehlt, und die Änderungen hochladen.
-3. Unter Releases ein neues Release mit dem Tag `v0.2.0` anlegen. Das Windows-Build hängt die ZIP danach selbst an.
+Windows kann beim ersten Start warnen, weil der Installer nicht signiert ist. Dann auf „Weitere Informationen“ und „Trotzdem ausführen“ klicken.
 
-Danach alte `.vst3` bei geschlossenem FL Studio ersetzen.
+So veröffentlichst du ein Update: In `CMakeLists.txt` die Versionsnummer erhöhen und die Änderungen hochladen. GitHub baut dann den Installer und legt das Release selbst an.
 
 ## Tests
 

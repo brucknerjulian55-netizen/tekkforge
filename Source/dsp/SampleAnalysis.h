@@ -128,7 +128,7 @@ struct Suggestion { int index; float value; std::string why; };
 struct SuggestionSet { std::vector<Suggestion> items; int playNote = 29; };
 
 /** Vorschlaege fuer den aktuellen Modus. Faustregeln als Startpunkt, kein Ersatz fuers Ohr. */
-inline SuggestionSet suggestSettings (int mode, const SampleReport& r)
+inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int osc = 0)
 {
     SuggestionSet out;
     const auto add = [&] (int p, float v, std::string why = {}) { out.items.push_back ({ modeParam (mode, p), v, std::move (why) }); };
@@ -136,11 +136,11 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r)
 
     const auto tuneTo = [&] (float targetHz)
     {
-        add (M_SMPPITCH, 1);
-        if (! r.tonal) { add (M_SMPROOT, 29); add (M_SMPTUNE, 0); out.playNote = 29; return; }
+        add (O (osc, O_PITCH), 1);
+        if (! r.tonal) { add (O (osc, O_ROOT), 29); add (O (osc, O_TUNE), 0); out.playNote = 29; return; }
         const int oct = (int) std::round (std::log2 (r.hz / targetHz));
-        add (M_SMPROOT, (float) r.note, "Grundton auf den gemessenen Ton gesetzt");
-        add (M_SMPTUNE, -r.cents / 100.0f, "Feinstimmung gleicht die Abweichung aus");
+        add (O (osc, O_ROOT), (float) r.note, "Grundton auf den gemessenen Ton gesetzt");
+        add (O (osc, O_TUNE), -r.cents / 100.0f, "Feinstimmung gleicht die Abweichung aus");
         out.playNote = std::clamp (r.note - 12 * oct, 12, 108);
     };
 
@@ -148,8 +148,8 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r)
     {
         case KICKBASS:
             tuneTo (52.0f);
-            add (M_SMPFREE, 0, "Die Hüllkurve bestimmt die Länge, damit der Schwanz vor der nächsten Kick endet");
-            add (M_GATE, 1); add (M_ATT, 0); add (M_HOLD, 60); add (M_DEC, 180); add (M_SUS, 0); add (M_REL, 20);
+            add (O (osc, O_FREE), 0, "Die Hüllkurve bestimmt die Länge, damit der Schwanz vor der nächsten Kick endet");
+            add (M_GATE, 2, "Spielart Notenlänge: Die Note im Piano Roll bestimmt die Länge des Basses"); add (M_ATT, 0); add (M_HOLD, 60); add (M_DEC, 180); add (M_LENGTH, 240); add (M_REL, 20);
             add (M_FTYPE, 0); add (M_CUT, 2200, "Tiefpass nimmt Höhen raus, der Bass bleibt im Fokus"); add (M_RES, 0.1f);
             add (M_LOWCUT, 30, "Unter 30 Hz kostet nur Headroom");
             add (M_SUBLVL, bass < 0.5f ? 0.7f : 0.35f, bass < 0.5f ? "Das Sample hat wenig Bass, der Sub trägt das Fundament" : "Das Sample hat schon Bass, der Sub stützt nur");
@@ -158,30 +158,30 @@ inline SuggestionSet suggestSettings (int mode, const SampleReport& r)
             break;
         case FULLKICK:
             tuneTo (52.0f);
-            add (M_SMPFREE, 0); add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 40); add (M_DEC, 320, "Rund 320 ms passen zu etwa 180 BPM");
+            add (O (osc, O_FREE), 0); add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 40); add (M_DEC, 320); add (M_LENGTH, 320, "Rund 320 ms passen zu etwa 180 BPM");
             add (M_FTYPE, 3); add (M_LOWCUT, 30);
             add (M_SUBLVL, bass < 0.4f ? 0.5f : 0.2f, bass < 0.4f ? "Wenig Bass im Sample, der Sub ergänzt ihn" : "Genug Bass im Sample");
             add (M_CLKLVL, r.attackMs > 3 ? 0.5f : 0.15f, r.attackMs > 3 ? "Weicher Anfang, der Click schärft den Attack" : "Der Attack ist schon da");
             add (M_DRV, 0.5f); add (M_DRVTYPE, 3); add (M_DRVTONE, 7000);
             break;
         case TOPKICK:
-            add (M_SMPPITCH, 0); add (M_SMPFREE, 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
-            add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 5); add (M_DEC, 70);
+            add (O (osc, O_PITCH), 0); add (O (osc, O_FREE), 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
+            add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 5); add (M_DEC, 70); add (M_LENGTH, 75);
             add (M_FTYPE, 3); add (M_LOWCUT, 240, "Der Bass gehört der Kick, hier wird alles darunter entfernt");
             add (M_SUBLVL, 0); add (M_CLKLVL, 0.3f); add (M_DRV, 0.5f); add (M_DRVTYPE, 3); add (M_DRVTONE, 7000);
             out.playNote = 41;
             break;
         case MELO:
-            add (M_SMPPITCH, 1); add (M_SMPROOT, (float) (r.tonal ? r.note : 60)); add (M_SMPTUNE, r.tonal ? -r.cents / 100.0f : 0.0f);
-            add (M_SMPFREE, 1); add (M_FTYPE, 3);
+            add (O (osc, O_PITCH), 1); add (O (osc, O_ROOT), (float) (r.tonal ? r.note : 60)); add (O (osc, O_TUNE), r.tonal ? -r.cents / 100.0f : 0.0f);
+            add (O (osc, O_FREE), 1); add (M_FTYPE, 3);
             add (M_LOWCUT, r.tonal ? std::clamp (r.hz * 0.7f, 120.0f, 300.0f) : 150.0f, "Lässt unten Platz für den Kick-Bass");
             add (M_SUBLVL, 0); add (M_CLKLVL, 0); add (M_DRV, 0.1f);
             out.playNote = r.tonal ? r.note : 60;
             break;
         default:
-            add (M_SMPPITCH, 1); add (M_SMPROOT, (float) (r.tonal ? r.note : 60)); add (M_SMPTUNE, r.tonal ? -r.cents / 100.0f : 0.0f);
-            add (M_SMPFREE, 0, "Stabs leben von einer kurzen Hüllkurve"); add (M_GATE, 0);
-            add (M_ATT, 1); add (M_HOLD, 20); add (M_DEC, 260); add (M_REL, 120);
+            add (O (osc, O_PITCH), 1); add (O (osc, O_ROOT), (float) (r.tonal ? r.note : 60)); add (O (osc, O_TUNE), r.tonal ? -r.cents / 100.0f : 0.0f);
+            add (O (osc, O_FREE), 0, "Stabs leben von einer kurzen Hüllkurve"); add (M_GATE, 0);
+            add (M_ATT, 1); add (M_HOLD, 20); add (M_DEC, 260); add (M_LENGTH, 280); add (M_REL, 120);
             add (M_FTYPE, 0); add (M_CUT, 3000); add (M_RES, 0.2f); add (M_FENV, 2); add (M_FDEC, 160);
             add (M_LOWCUT, 180, "Unter 180 Hz stört ein Stab nur den Bass");
             add (M_SUBLVL, 0); add (M_CLKLVL, 0);

@@ -26,7 +26,7 @@ enum { G_MODE = 0, G_MASTER, G_QUALITY, G_LIMIT, G_COUNT };
 // Parameter, die jeder Modus getrennt besitzt
 enum
 {
-    M_WAVE = 0, M_UNI, M_DETUNE, M_WIDTH, M_TUNE, M_FINE,
+    M_TUNE = 0, M_FINE,
     M_PAMT, M_PTIME, M_PCURVE,
     M_ATT, M_HOLD, M_DEC, M_SUS, M_REL, M_ACURVE, M_GATE,
     M_FTYPE, M_CUT, M_RES, M_FENV, M_FDEC,
@@ -35,9 +35,16 @@ enum
     M_DRV, M_DRVTYPE, M_DRVTONE,
     M_CHORD, M_STRUM,
     M_LOWCUT, M_VEL, M_LEVEL,
-    M_OSCLVL, M_SMPLVL, M_SMPSTART, M_SMPTUNE, M_SMPROOT, M_SMPPITCH, M_SMPLOOP, M_SMPFREE,
-    M_COUNT
+    M_LENGTH, M_OSC0,
+    M_COUNT = M_OSC0 + 3 * 13
 };
+
+// Drei Oszillatoren je Modus, jeder spielt eine Welle oder ein Sample
+constexpr int NUM_OSCS = 3;
+enum { O_LVL = 0, O_SRC, O_WAVE, O_TUNE, O_FINE, O_UNI, O_DETUNE, O_WIDTH, O_START, O_ROOT, O_PITCH, O_LOOP, O_FREE, O_COUNT };
+static_assert (M_COUNT == M_OSC0 + NUM_OSCS * O_COUNT, "M_COUNT passt nicht zu den Oszillatoren");
+constexpr int O (int osc, int p) { return M_OSC0 + osc * O_COUNT + p; }
+constexpr int sampleSlot (int mode, int osc) { return mode * NUM_OSCS + osc; }
 
 // FX
 constexpr int NUM_SLOTS = 8;
@@ -98,12 +105,12 @@ struct ParamDef
 enum FxType
 {
     FX_OFF = 0, FX_DIST, FX_FILTER, FX_CHORUS, FX_FLANGER, FX_PHASER, FX_DESTRUCTOR,
-    FX_CRUSH, FX_DELAY, FX_REVERB, FX_EQ, FX_COMP, FX_CLIP, FX_TYPES
+    FX_CRUSH, FX_DELAY, FX_REVERB, FX_EQ, FX_COMP, FX_CLIP, FX_SIDECHAIN, FX_TYPES
 };
 inline const std::vector<std::string>& fxNames()
 {
     static const std::vector<std::string> n { "Leer", "Distortion", "Filter", "Chorus", "Flanger", "Phaser",
-                                              "Destructor", "Bitcrush", "Delay", "Reverb", "EQ", "Kompressor", "Clipper" };
+                                              "Destructor", "Bitcrush", "Delay", "Reverb", "EQ", "Kompressor", "Clipper", "Sidechain" };
     return n;
 }
 
@@ -139,8 +146,11 @@ inline const FxP* fxInfo (int type)
                                          {"Release",10,800,0.4f,"ms",120}, {"Knee",0,12,1,"dB",3}, {"Makeup",-12,24,1,"dB",4} };
     static const FxP clip[FX_PARAMS] = { {"Drive",0,36,1,"dB",6}, {"Decke",-24,0,1,"dB",-1}, {"Weich",0,1,1,"",0.2f},
                                          {"Lowcut",20,800,0.4f,"Hz",20}, {"Ton",500,20000,0.35f,"Hz",20000}, {"Output",-24,12,1,"dB",0} };
+    static const FxP side[FX_PARAMS] = { {"Quelle",0,3,1,"",0,"Takt|Note|Audio|Link"}, {"Tiefe",0,1,1,"",0.85f}, {"Attack",0.1f,30,0.5f,"ms",1},
+                                         {"Länge",10,600,0.5f,"ms",180}, {"Bis Freq",60,20000,0.35f,"Hz",20000}, {"Pegel",0,1,1,"",0.1f} };
     switch (type)
     {
+        case FX_SIDECHAIN: return side;
         case FX_DIST: return dist;  case FX_FILTER: return filt;  case FX_CHORUS: return chor;
         case FX_FLANGER: return flan; case FX_PHASER: return phas; case FX_DESTRUCTOR: return dest;
         case FX_CRUSH: return crus; case FX_DELAY: return dela;   case FX_REVERB: return reve;
@@ -199,10 +209,6 @@ inline float modeDefault (int mode, int p)
     #define D(a,b,c,d,e) { static const float t[5] = { a, b, c, d, e }; return t[mode]; }
     switch (p)
     {
-        case M_WAVE:    D(1.7f,  2.0f,  1.6f,   0.25f,  0.0f)
-        case M_UNI:     D(3,     5,     1,      1,      1)
-        case M_DETUNE:  D(10,    18,    0,      0,      0)
-        case M_WIDTH:   D(0.6f,  0.85f, 0,      0,      0)
         case M_TUNE:    D(0,     0,     0,      0,      0)
         case M_FINE:    D(0,     0,     0,      0,      0)
         case M_PAMT:    D(0,     0,     60,     24,     48)
@@ -214,7 +220,8 @@ inline float modeDefault (int mode, int p)
         case M_SUS:     D(0,     0,     0,      0,      0)
         case M_REL:     D(180,   120,   10,     20,     20)
         case M_ACURVE:  D(0.5f,  0.55f, 0.6f,   0.35f,  0.5f)
-        case M_GATE:    D(0,     0,     0,      1,      0)
+        case M_GATE:    D(0,     0,     0,      2,      0)
+        case M_LENGTH:  D(450,   280,   75,     240,    360)
         case M_FTYPE:   D(0,     0,     0,      0,      0)
         case M_CUT:     D(3500,  2600,  12000,  1800,   9000)
         case M_RES:     D(0.15f, 0.25f, 0.1f,   0.1f,   0.1f)
@@ -234,11 +241,23 @@ inline float modeDefault (int mode, int p)
         case M_LOWCUT:  D(120,   180,   240,    30,     30)
         case M_VEL:     D(0.3f,  0.3f,  0,      0,      0)
         case M_LEVEL:   D(-9,    -9,    -6,     -6,     -6)
-        case M_OSCLVL:  D(1,     1,     1,      1,      1)
-        case M_SMPLVL:  D(1,     1,     1,      1,      1)
-        case M_SMPROOT: D(60,    60,    29,     29,     29)
-        case M_SMPPITCH:D(1,     1,     0,      1,      0)
-        case M_SMPFREE: D(1,     1,     1,      0,      1)
+        default: return 0;
+    }
+    #undef D
+}
+inline float oscDefault (int mode, int osc, int p)
+{
+    #define D(a,b,c,d,e) { static const float t[5] = { a, b, c, d, e }; return t[mode]; }
+    switch (p)
+    {
+        case O_LVL:    if (osc > 0) return 0; return 1;
+        case O_WAVE:   D(1.7f, 2.0f,  1.6f, 0.25f, 0.0f)
+        case O_UNI:    D(3,    5,     1,    1,     1)
+        case O_DETUNE: D(10,   18,    0,    0,     0)
+        case O_WIDTH:  D(0.6f, 0.85f, 0,    0,     0)
+        case O_ROOT:   D(60,   60,    29,   29,    29)
+        case O_PITCH:  D(1,    1,     0,    1,     0)
+        case O_FREE:   D(1,    1,     1,    0,     1)
         default: return 0;
     }
     #undef D
@@ -250,9 +269,10 @@ inline std::vector<FrozenValue> frozenValues (int mode, int note)
 {
     std::vector<FrozenValue> v { { G_MODE, (float) mode }, { G_MASTER, 0 }, { G_QUALITY, 0 }, { G_LIMIT, 0 } };
     const std::pair<int, float> m[] = {
-        { M_OSCLVL, 0 }, { M_CLKLVL, 0 }, { M_SUBLVL, 0 }, { M_DRV, 0 }, { M_PAMT, 0 }, { M_FENV, 0 }, { M_FTYPE, 3 },
-        { M_LOWCUT, 20 }, { M_LEVEL, 0 }, { M_VEL, 0 }, { M_UNI, 1 }, { M_CHORD, 0 }, { M_STRUM, 0 }, { M_TUNE, 0 }, { M_FINE, 0 },
-        { M_SMPLVL, 1 }, { M_SMPROOT, (float) note }, { M_SMPSTART, 0 }, { M_SMPTUNE, 0 }, { M_SMPLOOP, 0 }, { M_SMPFREE, 1 } };
+        { M_CLKLVL, 0 }, { M_SUBLVL, 0 }, { M_DRV, 0 }, { M_PAMT, 0 }, { M_FENV, 0 }, { M_FTYPE, 3 },
+        { M_LOWCUT, 20 }, { M_LEVEL, 0 }, { M_VEL, 0 }, { M_CHORD, 0 }, { M_STRUM, 0 }, { M_TUNE, 0 }, { M_FINE, 0 },
+        { O (0, O_LVL), 1 }, { O (0, O_SRC), 1 }, { O (0, O_ROOT), (float) note }, { O (0, O_START), 0 }, { O (0, O_TUNE), 0 }, { O (0, O_FINE), 0 },
+        { O (0, O_LOOP), 0 }, { O (0, O_FREE), 1 }, { O (1, O_LVL), 0 }, { O (2, O_LVL), 0 } };
     for (auto& e : m) v.push_back ({ modeParam (mode, e.first), e.second });
     return v;
 }
@@ -287,10 +307,6 @@ inline const std::vector<ParamDef>& params()
             auto C = [&] (int p, const char* id, const char* name, std::vector<std::string> items)
             { ch (modeParam (m, p), pi + id, pn + name, std::move (items), (int) modeDefault (m, p)); };
 
-            F (M_WAVE, "wave", "Welle", 0, 3, 1, "");
-            F (M_UNI, "uni", "Unison", 1, 7, 1, "");
-            F (M_DETUNE, "detune", "Verstimmung", 0, 60, 0.6f, "ct");
-            F (M_WIDTH, "width", "Breite", 0, 1, 1, "");
             F (M_TUNE, "tune", "Tune", -24, 24, 1, "st");
             F (M_FINE, "fine", "Fein", -100, 100, 1, "ct");
             F (M_PAMT, "pamt", "Pitch Menge", -24, 84, 1, "st");
@@ -302,7 +318,7 @@ inline const std::vector<ParamDef>& params()
             F (M_SUS, "sus", "Sustain", 0, 1, 1, "");
             F (M_REL, "rel", "Release", 1, 2000, 0.3f, "ms");
             F (M_ACURVE, "acurve", "Hkurve", 0, 1, 1, "");
-            C (M_GATE, "gate", "Spielart", { "One-Shot", "Gate" });
+            C (M_GATE, "gate", "Spielart", { "One-Shot", "Gate", "Notenlänge" });
             C (M_FTYPE, "ftype", "Filterart", { "LP", "HP", "BP", "Aus" });
             F (M_CUT, "cut", "Cutoff", 20, 20000, 0.3f, "Hz");
             F (M_RES, "res", "Resonanz", 0, 1, 1, "");
@@ -322,14 +338,28 @@ inline const std::vector<ParamDef>& params()
             F (M_LOWCUT, "lowcut", "Lowcut", 20, 800, 0.4f, "Hz");
             F (M_VEL, "vel", "Velocity", 0, 1, 1, "");
             F (M_LEVEL, "level", "Pegel", -36, 6, 1, "dB");
-            F (M_OSCLVL, "osclvl", "Osz Pegel", 0, 1, 1, "");
-            F (M_SMPLVL, "smplvl", "Sample Pegel", 0, 1, 1, "");
-            F (M_SMPSTART, "smpstart", "Sample Start", 0, 1, 1, "");
-            F (M_SMPTUNE, "smptune", "Sample Tune", -24, 24, 1, "st");
-            F (M_SMPROOT, "smproot", "Sample Grundton", 0, 127, 1, "");
-            C (M_SMPPITCH, "smppitch", "Sample Tonhöhe", { "Fest", "Note", "Note + Kurve" });
-            C (M_SMPLOOP, "smploop", "Sample Loop", { "Aus", "An" });
-            C (M_SMPFREE, "smpfree", "Sample Länge", { "Hüllkurve", "Ganz" });
+            F (M_LENGTH, "length", "Länge", 5, 6000, 0.3f, "ms");
+            for (int o = 0; o < NUM_OSCS; ++o)
+            {
+                const std::string oi = pi + "o" + std::to_string (o) + "_", on = pn + "Osz " + std::string (1, (char) ('A' + o)) + " ";
+                auto OF = [&] (int p, const char* id, const char* name, float mn, float mx, float skew, const char* unit)
+                { fl (modeParam (m, O (o, p)), oi + id, on + name, mn, mx, oscDefault (m, o, p), skew, unit); };
+                auto OC = [&] (int p, const char* id, const char* name, std::vector<std::string> items)
+                { ch (modeParam (m, O (o, p)), oi + id, on + name, std::move (items), (int) oscDefault (m, o, p)); };
+                OF (O_LVL, "lvl", "Pegel", 0, 1, 1, "");
+                OC (O_SRC, "src", "Quelle", { "Welle", "Sample" });
+                OF (O_WAVE, "wave", "Welle", 0, 3, 1, "");
+                OF (O_TUNE, "tune", "Tune", -24, 24, 1, "st");
+                OF (O_FINE, "fine", "Fein", -100, 100, 1, "ct");
+                OF (O_UNI, "uni", "Stimmen", 1, 7, 1, "");
+                OF (O_DETUNE, "detune", "Verstimmung", 0, 60, 0.6f, "ct");
+                OF (O_WIDTH, "width", "Breite", 0, 1, 1, "");
+                OF (O_START, "start", "Sample Start", 0, 1, 1, "");
+                OF (O_ROOT, "root", "Grundton", 0, 127, 1, "");
+                OC (O_PITCH, "pitch", "Tonhöhe", { "Fest", "Note", "Note + Kurve" });
+                OC (O_LOOP, "loop", "Loop", { "Aus", "An" });
+                OC (O_FREE, "free", "Länge", { "Hüllkurve", "Ganz" });
+            }
         }
         for (int s = 0; s < NUM_SLOTS; ++s)
         {

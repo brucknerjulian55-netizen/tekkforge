@@ -139,9 +139,13 @@ struct AllPass
     }
 };
 
+/** Was der Sidechain-Effekt pro Rechenschritt von aussen braucht. */
+struct FxContext { double ppq = 0; int notes = 0; float sideLevel = 0; };
+
 class FxSlot
 {
 public:
+    const FxContext* ctx = nullptr;
     void allocate (float maxSr)
     {
         dlLen = (int) (maxSr * 1.6f) + 8;
@@ -177,6 +181,7 @@ public:
             for (auto& b : eq[c]) b.reset();
             hold[c] = 0;
         }
+        duckTime = 1.0e6f; lastBeat = -1.0e9; lastNotes = -1; sideOver = false;
         phaser.reset(); wr = 0; lfo = 0; holdCount = 0; envDb = 0; lastEqKey = 1e30f;
     }
     void setLowcut (float hz) { for (auto& x : hp) x.set (hz, sr); }
@@ -211,6 +216,7 @@ public:
             case FX_EQ:         equalizer (L, R, n, p); break;
             case FX_COMP:       compressor (L, R, n, p); break;
             case FX_CLIP:       clipper (L, R, n, p); break;
+            case FX_SIDECHAIN:  sidechain (L, R, n, p); break;
             default: break;
         }
         const float mix = v[S_MIX];
@@ -390,9 +396,47 @@ private:
             }
         }
     }
+    void sidechain (float* L, float* R, int n, const float* p)
+    {
+        const int source = (int) p[0];
+        bool trig = false;
+        if (ctx != nullptr)
+        {
+            if (source == 0) { const double b = std::floor (ctx->ppq); if (b != lastBeat) { lastBeat = b; trig = true; } }
+            else if (source == 1) { if (ctx->notes != lastNotes) { lastNotes = ctx->notes; trig = true; } }
+            else if (source == 2)
+            {
+                const bool over = ctx->sideLevel > 0.01f + p[5] * 0.5f;
+                trig = over && ! sideOver && duckTime > 0.03f;
+                sideOver = over;
+            }
+        }
+        if (trig) duckTime = 0;
+        const float a = p[2] * 0.001f, len = p[3] * 0.001f, dt = 1.0f / sr, depth = p[1];
+        const bool split = p[4] < 19000.0f;
+        if (split) { setTone (p[4]); setLowcut (p[4]); }
+        const float link = source == 3 ? p[5] : 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            float e = duckTime < a ? duckTime / a : duckTime < a + len ? 1.0f - (duckTime - a) / len : 0.0f;
+            e = e * e * (3.0f - 2.0f * e);
+            duckTime += dt;
+            const float g = 1.0f - depth * std::max (e, link);
+            if (split)
+            {
+                const float ll = hp[0].lp (post[0].lp (L[i])), lr = hp[1].lp (post[1].lp (R[i]));
+                L[i] += ll * (g - 1.0f); R[i] += lr * (g - 1.0f);
+            }
+            else { L[i] *= g; R[i] *= g; }
+        }
+    }
+
     float noise() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (float) (rng & 0xffffff) / 16777216.0f; }
 
-    float sr = 44100;
+    float sr = 44100, duckTime = 1.0e6f;
+    double lastBeat = -1.0e9;
+    int lastNotes = -1;
+    bool sideOver = false;
     int lastType = 0, dlLen = 1, wr = 0;
     unsigned holdCount = 0, rng = 0x9e3779b9u;
     float lfo = 0, hold[2] {}, envDb = 0, lastEqKey = 1e30f;

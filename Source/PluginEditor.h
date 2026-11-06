@@ -27,13 +27,13 @@ public:
 
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void filesDropped (const juce::StringArray&, int, int) override;
-    void loadSampleFile (const juce::File&);
-    void chooseSample();
+    void loadSampleFile (const juce::File&, int osc);
+    void chooseSample (int osc);
     void chooseExport();
     void chooseImport();
     void askRenderSound();
     juce::String status;     // Hinweistext auf den Seiten Sample und Presets
-    int specMode = 0, sampleView = 0, guideView = 0, recipe = 0;   // gemerkte Ansichten
+    int specMode = 0, sampleView = 0, guideView = 0, recipe = 0, sampleOsc = 0;   // gemerkte Ansichten
 
 private:
     void timerCallback() override;
