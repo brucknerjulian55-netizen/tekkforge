@@ -18,29 +18,20 @@ Multisynth als VST3 für FL Studio, mit fünf Modi: Melo One-Shot, Stab, Topkick
 
 ## Bedienung
 
-- **Modus-Knöpfe oben:** Jeder Modus merkt sich eigene Einstellungen. FX und Auto gelten für alle Modi.
-- **Synth:** Alles Wichtige liegt auf einer Seite: Oszillator A, B und C, Sub, Hüllkurven, Filter, Drive, LFOs und Envs. Alle Regler sind drehbar, Doppelklick setzt sie zurück. In den Anzeigen lassen sich die Kurven direkt ziehen.
-- **Oszillatoren:** Jeder der drei spielt eine Welle oder ein Sample. Ziehe eine Audiodatei direkt auf den Oszillator. Der Sub hat einen eigenen Lautstärke-Regler.
-- **Länge:** Der Regler Länge bestimmt die Dauer des Sounds. Bei Spielart Notenlänge entscheidet die Note im Piano Roll, das ist für Bass meist am einfachsten.
-- **Sidechain:** Auf der FX-Seite gibt es den Effekt Sidechain. Lade ihn im Bass. Quelle Takt duckt auf jeder Viertel, Note bei jeder Note dieser Instanz, Link über den Regler Pegel (zum Beispiel mit dem Peak Controller in FL) und Audio über den Sidechain-Eingang. Bis Freq begrenzt das Ducken auf die Bässe.
-  Bei der Pitch-Kurve ändert das Mausrad die Krümmung.
-- **FX:** Acht Slots in Reihenfolge von oben nach unten. Jeder Effekt darf mehrfach vorkommen.
-  Slot anklicken, Effekt wählen. Reihen lassen sich ziehen, der Punkt rechts schaltet den Slot an oder aus.
-- **Auto:** Vier interne Automationen. Kurve zeichnen, Ziel wählen oder „Ziel per Klick“ nutzen. Ein weißer Bogen am Regler zeigt die Bewegung.
-- **Guide:** Frequenzbereiche und Prüfliste des aktuellen Modus. Die Zonen sind auch im Spektrum auf der Synth-Seite sichtbar.
-- **Sample:** Zeigt das Sample des gewählten Oszillators groß, mit Spektrogramm, Tonhöhe, Loop und Startpunkt. Ein Sample darf bis 30 Sekunden lang sein.
-- **LFOs und Envs:** Drei LFOs und drei Envs liegen auf der Synth-Seite. Zieh eine Quelle aus der Leiste über der Tastatur auf einen Regler, zum Beispiel Env 1 auf Tune für Pitch.
-  Die Stärke stellst du auf der Seite Mod ein, dort stehen alle Verbindungen. Rechtsklick auf den Regler entfernt eine Verbindung.
-  LFOs und Envs laufen gemeinsam für alle Stimmen, nicht pro Stimme.
-- **Presets:** „In Tekkforge speichern“ legt das Preset in deiner internen Liste ab, die in jedem Projekt verfügbar ist.
-  „Als Datei exportieren“ schreibt eine `.tkf`-Datei an einen beliebigen Ort. Samples stecken mit drin.
-  Dazu speichert FL Studio den ganzen Zustand samt Samples im Projekt.
-- **Sound fertig rendern:** Der Knopf auf der Presets-Seite rechnet den aktuellen Sound samt FX, LFOs und Envs in ein Sample und spart so Rechenleistung live.
-  Vorher fragt Tekkforge, ob du ein Preset speichern möchtest. Gerendert wird die zuletzt gespielte Note. Danach steht alles auf Standard, auch die anderen Modi, und nur das Sample bleibt.
-- **Analyzer-Ansichten:** Spektren haben oben rechts die Ansichten Kurve, Balken und Spektrogramm. Fahr mit der Maus darüber, dann stehen Frequenz und Note daneben.
-  Bei EQ und Filter liegt die Kurve über dem Analyzer und die Punkte lassen sich ziehen. Die Seite Sample zeigt das geladene Sample ebenfalls als Spektrogramm.
-- **Anleitungen:** Auf der Seite Guide gibt es pro Modus Schritt-für-Schritt-Anleitungen. Mit geladenem Sample misst Tekkforge Grundton, Länge und Bassanteil und schlägt Einstellungen vor.
-- **Farbdesign:** Auf der Presets-Seite stehen acht Designs. Die Wahl gilt für alle Instanzen.
+- **Modi:** Melo, Stab und Kick. Jeder Modus merkt sich eigene Einstellungen.
+- **Ebenen:** Jeder Modus hat drei Ebenen untereinander, im Kick-Modus Topkick, Bass und Layer. Jede Ebene ist ein kleiner Synth mit Quelle, Hüllkurve, Pitch, Filter, Drive, Sub, Lowcut und eigenen FX. M schaltet stumm, S hört sie einzeln, FX öffnet ihre Effekte.
+- **Quelle:** Welle von Sinus bis Rauschen oder Sample. Ziehe eine Audiodatei direkt auf die Quelle einer Ebene.
+- **Länge:** Der Regler Länge bestimmt die Dauer der Ebene. Bei Spielart Notenlänge kürzt zusätzlich die Note im Piano Roll, und Sustain hält den Ton.
+- **Vorhören:** Bei gestopptem FL spielt Tekkforge nach jeder Reglerbewegung die letzte Note kurz an. Der Knopf oben schaltet das aus.
+- **Env und LFO wie in Vital:** Unten liegen die Reiter Env 1 bis 3 und LFO 1 bis 4. Ziehe einen Reiter auf einen Regler. Am Regler erscheint ein kleiner Punkt: Nach oben oder unten ziehen stellt die Stärke ein, Rechtsklick entfernt die Verbindung. Der helle Bogen zeigt den Bereich, der Punkt im Ring die aktuelle Position. Quellen laufen pro gespielter Note.
+- **LFO zeichnen:** Zeichne die Form direkt mit der Maus oder wähle eine Vorlage. Start: Frei läuft durch, Je Note beginnt neu, Einmal läuft einmal durch wie eine Hüllkurve.
+- **FX:** Master hat acht Slots, jede Ebene drei. Jeder Effekt darf mehrfach vorkommen.
+- **Sidechain:** Lade den Effekt in die Bass-Ebene. Quelle Takt duckt auf jeder Viertel, Note bei jeder Note, Link über den Regler Pegel (zum Beispiel mit dem Peak Controller in FL) und Audio über den Sidechain-Eingang. Bis Freq begrenzt das Ducken auf die Bässe.
+- **Sample:** Zeigt das Sample der gewählten Ebene groß, mit Spektrogramm, Tonhöhe, Loop und Startpunkt.
+- **Matrix:** Alle Verbindungen in einer Liste.
+- **Guide:** Frequenzbereiche, Anleitungen und Vorschläge für geladene Samples.
+- **Presets:** „In Tekkforge speichern“ legt das Preset in deiner internen Liste ab. „Als Datei exportieren“ schreibt eine `.tkf`-Datei. Samples stecken mit drin. „Sound fertig rendern“ rechnet alles in ein Sample und setzt den Rest auf Standard.
+- **Farbdesign:** Acht Designs auf der Presets-Seite.
 
 ## Automation in FL Studio
 
