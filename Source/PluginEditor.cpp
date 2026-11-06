@@ -27,7 +27,7 @@ namespace theme
     }
     inline void saveChoice() { choiceFile().getParentDirectory().createDirectory(); choiceFile().replaceWithText (juce::String (current)); }
     inline void loadChoice() { if (current < 0) apply (choiceFile().loadFileAsString().getIntValue()); }
-    inline Colour accent (int mode) { return accents[juce::jlimit (0, 4, mode)]; }
+    inline Colour accent (int mode) { static const int map[3] = { 0, 1, 4 }; return accents[map[juce::jlimit (0, 2, mode)]]; }
     inline juce::Font font (float h, bool bold = false)
     {
         return juce::Font (juce::FontOptions (h, bold ? juce::Font::bold : juce::Font::plain));
@@ -48,7 +48,7 @@ class TkLook : public juce::LookAndFeel_V4
 {
 public:
     TkLook() { setDefaultSansSerifTypefaceName ("Bahnschrift"); }
-    Colour accent = theme::accent (4);
+    Colour accent = theme::accent (2);
 
     void drawRotarySlider (Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
     {
@@ -67,8 +67,10 @@ public:
         Path tick; tick.addRoundedRectangle (-1.5f, -(r - 8), 3.0f, r * 0.42f, 1.5f);
         g.setColour (theme::ink); g.fillPath (tick, juce::AffineTransform::rotation (ang).translated (c));
 
+        const float range = (float) s.getProperties().getWithDefault ("range", -1.0f);
+        if (range >= 0.0f) arc (ang, a0 + range * (a1 - a0), r - 2, 4.0f, theme::ink.withAlpha (0.45f));
         const float mod = (float) s.getProperties().getWithDefault ("mod", -1.0f);
-        if (mod >= 0.0f) arc (ang, a0 + mod * (a1 - a0), r + 0.5f, 2.0f, theme::ink);
+        if (mod >= 0.0f) { const float m = a0 + mod * (a1 - a0); g.setColour (theme::ink); g.fillEllipse (c.x + (r - 2) * std::sin (m) - 2.5f, c.y - (r - 2) * std::cos (m) - 2.5f, 5.0f, 5.0f); }
     }
 };
 
@@ -91,6 +93,35 @@ public:
     virtual void tick() { for (auto* c : getChildren()) if (auto* t = dynamic_cast<Ticking*> (c)) t->tick(); }
 };
 
+/** Kleiner Punkt am Regler fuer eine Verbindung: Ziehen stellt die Staerke ein, Rechtsklick entfernt sie. */
+class ModDot : public juce::Component
+{
+public:
+    ModDot (Ed& ed, int slotIndex, std::function<void (const String&)> show) : d (ed), slot (slotIndex), report (std::move (show)) {}
+    PRef amount() const { return { d.p.param (modSlot (slot, MD_AMOUNT)) }; }
+    void paint (Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (d.acc); g.fillEllipse (b);
+        g.setColour (theme::ink); g.drawEllipse (b, 1.0f);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) { d.p.disconnect (slot); return; }
+        amount().begin(); start = amount().norm(); mouseDrag (e);
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.mods.isPopupMenu()) return;
+        amount().setNorm (start - (float) e.getDistanceFromDragStartY() / 160.0f);
+        report (U (sourceName ((int) d.p.rawValue (modSlot (slot, MD_SOURCE)))) + " " + String (amount().real(), 2));
+    }
+    void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) { amount().end(); report ({}); } }
+    juce::MouseCursor getMouseCursor() override { return juce::MouseCursor::UpDownResizeCursor; }
+private:
+    Ed& d; int slot; float start = 0; std::function<void (const String&)> report;
+};
+
 class Knob : public Ticking, public juce::DragAndDropTarget
 {
 public:
@@ -100,74 +131,76 @@ public:
         s.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
         s.setRotaryParameters (juce::degreesToRadians (-135.0f) + juce::MathConstants<float>::twoPi,
                                juce::degreesToRadians (135.0f) + juce::MathConstants<float>::twoPi, true);
-        s.setMouseDragSensitivity (180);
+        s.setMouseDragSensitivity (160);
         addAndMakeVisible (s);
         auto* p = d.p.param (idx);
         att = std::make_unique<juce::SliderParameterAttachment> (*p, s, nullptr);
         s.setDoubleClickReturnValue (true, p->convertFrom0to1 (p->getDefaultValue()));
-        s.addMouseListener (this, false);
     }
-    ~Knob() override { s.removeMouseListener (this); }
-    void resized() override { auto b = getLocalBounds().removeFromTop (getHeight() - 30); const int z = juce::jmin (46, b.getHeight()); s.setBounds (b.withSizeKeepingCentre (z, z)); }
+    void resized() override
+    {
+        auto b = getLocalBounds().removeFromTop (getHeight() - 30); const int z = juce::jmin (46, b.getHeight());
+        s.setBounds (b.withSizeKeepingCentre (z, z));
+        layoutDots();
+    }
+    void layoutDots()
+    {
+        for (size_t i = 0; i < dots.size(); ++i) dots[i]->setBounds (getWidth() - 12, 1 + (int) i * 12, 11, 11);
+    }
     void paint (Graphics& g) override
     {
         auto b = getLocalBounds().removeFromBottom (30);
         g.setColour (theme::dim); g.setFont (theme::font (12.0f));
         g.drawFittedText (name, b.removeFromTop (14), juce::Justification::centred, 1, 0.7f);
-        g.setColour (theme::ink); g.setFont (theme::font (12.0f));
-        g.drawFittedText (shown, b, juce::Justification::centred, 1, 0.7f);
+        g.setColour (override_.isNotEmpty() ? d.acc : theme::ink); g.setFont (theme::font (12.0f));
+        g.drawFittedText (override_.isNotEmpty() ? override_ : shown, b, juce::Justification::centred, 1, 0.7f);
     }
     void tick() override
     {
         auto* p = d.p.param (idx);
-        const String v = p->getCurrentValueAsText().fromFirstOccurrenceOf (name + " ", false, false).isNotEmpty()
-                           ? p->getCurrentValueAsText().fromFirstOccurrenceOf (name + " ", false, false) : p->getCurrentValueAsText();
+        const String raw = p->getCurrentValueAsText(), tail = raw.fromFirstOccurrenceOf (name + " ", false, false);
+        const String v = tail.isNotEmpty() ? tail : raw;
         if (v != shown) { shown = v; repaint(); }
-        float mod = -1.0f;
-        for (int l = 0; l < NUM_LANES; ++l)
-            if (d.p.rawValue (laneParam (l, L_ON)) > 0.5f && (int) d.p.rawValue (laneParam (l, L_TARGET)) == idx)
-                mod = d.p.modView[(size_t) idx].load (std::memory_order_relaxed);
+
+        // Verbindungen dieses Reglers
+        std::vector<int> now; float sum = 0;
         for (int m = 0; m < NUM_MODS; ++m)
-            if ((int) d.p.rawValue (modSlot (m, MD_TARGET)) == idx)
-                mod = d.p.modView[(size_t) idx].load (std::memory_order_relaxed);
-        if (std::fabs (mod - lastMod) > 0.002f) { lastMod = mod; s.getProperties().set ("mod", mod); s.repaint(); }
+            if ((int) d.p.rawValue (modSlot (m, MD_TARGET)) == idx) { now.push_back (m); sum += d.p.rawValue (modSlot (m, MD_AMOUNT)); }
+        if (now != slots)
+        {
+            slots = now; dots.clear();
+            for (int m : slots)
+            {
+                auto dot = std::make_unique<ModDot> (d, m, [this] (const String& t) { override_ = t; repaint(); });
+                addAndMakeVisible (*dot); dots.push_back (std::move (dot));
+            }
+            layoutDots();
+        }
+        const float range = slots.empty() ? -1.0f : juce::jlimit (0.0f, 1.0f, p->getValue() + sum);
+        const float mod = slots.empty() ? -1.0f : d.p.modView[(size_t) idx].load (std::memory_order_relaxed);
+        if (std::fabs (range - lastRange) > 0.002f || std::fabs (mod - lastMod) > 0.002f)
+        {
+            lastRange = range; lastMod = mod;
+            s.getProperties().set ("range", range); s.getProperties().set ("mod", mod); s.repaint();
+        }
     }
-    bool isInterestedInDragSource (const SourceDetails& s) override { return s.description.toString().startsWith ("tkmod:"); }
+    bool isInterestedInDragSource (const SourceDetails& e) override { return e.description.toString().startsWith ("tkmod:"); }
     void itemDragEnter (const SourceDetails&) override { dropHover = true; repaint(); }
     void itemDragExit (const SourceDetails&) override { dropHover = false; repaint(); }
-    void itemDropped (const SourceDetails& s) override
+    void itemDropped (const SourceDetails& e) override
     {
         dropHover = false; repaint();
-        d.p.connect (s.description.toString().fromFirstOccurrenceOf (":", false, false).getIntValue(), idx);
+        d.p.connect (e.description.toString().fromFirstOccurrenceOf (":", false, false).getIntValue(), idx);
     }
     void paintOverChildren (Graphics& g) override
     {
         if (dropHover) { g.setColour (d.acc); g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 6.0f, 2.0f); }
     }
-    void mouseDown (const juce::MouseEvent& e) override
-    {
-        if (e.mods.isPopupMenu())
-        {
-            juce::PopupMenu m;
-            for (int i = 0; i < NUM_MODS; ++i)
-                if ((int) d.p.rawValue (modSlot (i, MD_TARGET)) == idx)
-                    m.addItem (i + 1, U (sourceName ((int) d.p.rawValue (modSlot (i, MD_SOURCE)))) + U (" entfernen"));
-            if (m.getNumItems() > 0)
-                m.showMenuAsync (juce::PopupMenu::Options(), [this] (int r) { if (r > 0) d.p.disconnect (r - 1); });
-            return;
-        }
-        if (d.e.learnLane >= 0)
-        {
-            auto* t = d.p.param (laneParam (d.e.learnLane, L_TARGET));
-            t->setValueNotifyingHost (t->convertTo0to1 ((float) idx));
-            d.e.learnLane = -1;
-            d.e.showPage (4);
-        }
-    }
     juce::Slider s;
 private:
-    Ed& d; int idx; String name, shown; float lastMod = -2.0f; bool dropHover = false;
+    Ed& d; int idx; String name, shown, override_; float lastMod = -2.0f, lastRange = -2.0f; bool dropHover = false;
     std::unique_ptr<juce::SliderParameterAttachment> att;
+    std::vector<int> slots; std::vector<std::unique_ptr<ModDot>> dots;
 };
 
 /** Knopfleiste fuer Auswahl-Parameter, zeigt alle Optionen gleichzeitig. */
@@ -270,10 +303,10 @@ protected:
 class WaveDisp : public XYDisp
 {
 public:
-    WaveDisp (Ed& ed, int oscIndex) : XYDisp (ed, { modeParam (ed.mode, O (oscIndex, O_WAVE)), modeParam (ed.mode, O (oscIndex, O_UNI)), modeParam (ed.mode, O (oscIndex, O_DETUNE)),
-                                                    modeParam (ed.mode, O (oscIndex, O_SRC)) }, O (oscIndex, O_WAVE), -1), osc (oscIndex) {}
-    const SampleData* sample() const { return d.p.samples[sampleSlot (d.mode, osc)].load(); }
-    bool isSample() const { return val (O (osc, O_SRC)) > 0.5f; }
+    WaveDisp (Ed& ed, int layerIndex) : XYDisp (ed, { modeParam (ed.mode, Y (layerIndex, LY_WAVE)), modeParam (ed.mode, Y (layerIndex, LY_UNI)), modeParam (ed.mode, Y (layerIndex, LY_DETUNE)),
+                                                      modeParam (ed.mode, Y (layerIndex, LY_SRC)) }, Y (layerIndex, LY_WAVE), -1), layer (layerIndex) {}
+    const SampleData* sample() const { return d.p.samples[sampleSlot (d.mode, layer)].load(); }
+    bool isSample() const { return val (Y (layer, LY_SRC)) > 0.5f; }
     void draw (Graphics& g, Rectangle<float> b) override
     {
         if (isSample())
@@ -298,18 +331,19 @@ public:
             g.drawText (U (s->name), b.removeFromTop (13.0f), juce::Justification::centredLeft, true);
             return;
         }
-        const float w = val (O (osc, O_WAVE)); Path p; const int N = 200;
+        const float w = val (Y (layer, LY_WAVE)); Path p; const int N = 200;
+        juce::Random r (5);
         for (int i = 0; i <= N; ++i)
         {
             const float ph = std::fmod ((float) i / (float) N * 2.0f, 1.0f);
-            const float y = b.getCentreY() - morphOsc (ph, 0.001f, w) * b.getHeight() * 0.42f;
+            const float y = b.getCentreY() - morphOsc (ph, 0.001f, w, r.nextFloat() * 2.0f - 1.0f) * b.getHeight() * 0.42f;
             const float x = b.getX() + b.getWidth() * (float) i / (float) N;
             if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
         }
-        const int uni = (int) std::round (val (O (osc, O_UNI)));
+        const int uni = (int) std::round (val (Y (layer, LY_UNI)));
         for (int u = 1; u < uni; ++u)
         {
-            const float o = (float) (u - uni / 2) * juce::jmin (5.0f, val (O (osc, O_DETUNE)) * 0.25f);
+            const float o = (float) (u - uni / 2) * juce::jmin (5.0f, val (Y (layer, LY_DETUNE)) * 0.25f);
             g.setColour (d.acc.withAlpha (0.25f));
             g.strokePath (p, juce::PathStrokeType (1.0f), juce::AffineTransform::translation (o, 0));
         }
@@ -317,7 +351,7 @@ public:
     }
     void mouseDown (const juce::MouseEvent& e) override
     {
-        if (isSample()) { if (sample() == nullptr) d.e.chooseSample (osc); return; }
+        if (isSample()) { if (sample() == nullptr) d.e.chooseSample (layer); return; }
         XYDisp::mouseDown (e);
     }
     void mouseDrag (const juce::MouseEvent& e) override { if (! isSample()) XYDisp::mouseDrag (e); }
@@ -329,17 +363,17 @@ public:
         if (v != seen) { seen = v; repaint(); }
     }
 private:
-    int osc, seen = -1;
+    int layer, seen = -1;
 };
 
 class PitchDisp : public XYDisp
 {
 public:
-    PitchDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_PAMT), modeParam (ed.mode, M_PTIME), modeParam (ed.mode, M_PCURVE) }, M_PTIME, M_PAMT) {}
+    PitchDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_PAMT)), modeParam (ed.mode, Y (l, LY_PTIME)), modeParam (ed.mode, Y (l, LY_PCURVE)) }, Y (l, LY_PTIME), Y (l, LY_PAMT)), layer (l) {}
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float nx = ref (M_PTIME).norm(), ny = ref (M_PAMT).norm(), c = 1.0f + val (M_PCURVE) * 9.0f;
-        const float zero = b.getY() + b.getHeight() * (1.0f - params()[(size_t) modeParam (0, M_PAMT)].toNorm (0));
+        const float nx = ref (Y (layer, LY_PTIME)).norm(), ny = ref (Y (layer, LY_PAMT)).norm(), c = 1.0f + val (Y (layer, LY_PCURVE)) * 9.0f;
+        const float zero = b.getY() + b.getHeight() * (1.0f - params()[(size_t) modeParam (0, Y (0, LY_PAMT))].toNorm (0));
         g.setColour (theme::line); g.drawHorizontalLine ((int) zero, b.getX(), b.getRight());
         const float top = b.getBottom() - ny * b.getHeight(), endX = b.getX() + nx * b.getWidth();
         Path p; p.startNewSubPath (b.getX(), top);
@@ -349,54 +383,31 @@ public:
             p.lineTo (b.getX() + t * (endX - b.getX()), zero + (top - zero) * std::pow (1.0f - t, c));
         }
         p.lineTo (b.getRight(), zero);
-        stroke (g, p); dot (g, b.getX() + 2, top); dot (g, endX, zero);
+        stroke (g, p); dot (g, endX, zero);
     }
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) override { auto r = ref (M_PCURVE); r.setNorm (r.norm() + w.deltaY * 0.2f); }
+private:
+    int layer;
 };
 
-class AmpDisp : public Disp
+class AmpDisp : public XYDisp
 {
 public:
-    AmpDisp (Ed& ed) : Disp (ed, { modeParam (ed.mode, M_ATT), modeParam (ed.mode, M_HOLD), modeParam (ed.mode, M_DEC), modeParam (ed.mode, M_SUS), modeParam (ed.mode, M_REL), modeParam (ed.mode, M_ACURVE), modeParam (ed.mode, M_GATE), modeParam (ed.mode, M_LENGTH) }) {}
-    bool gate() const { return val (M_GATE) > 0.5f; }
-    float susValue() const { const int g = (int) val (M_GATE); return g == 2 ? 1.0f : g == 1 ? val (M_SUS) : 0.0f; }
-    float px (int i) const   // Jeder Abschnitt nutzt ein Viertel der Breite, verschoben um die Vorgaenger
-    {
-        static const int order[4] = { M_ATT, M_HOLD, M_DEC, M_REL };
-        float x = 0; for (int k = 0; k <= i; ++k) x += ref (order[k]).norm() * 0.25f;
-        return x;
-    }
+    AmpDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_ATT)), modeParam (ed.mode, Y (l, LY_LEN)), modeParam (ed.mode, Y (l, LY_SUS)), modeParam (ed.mode, Y (l, LY_REL)),
+                                            modeParam (ed.mode, Y (l, LY_CURVE)), modeParam (ed.mode, Y (l, LY_HOLD)) }, Y (l, LY_LEN), Y (l, LY_SUS)), layer (l) {}
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float sus = susValue(), c = 0.6f + val (M_ACURVE) * 5.4f;
-        const auto X = [&] (float n) { return b.getX() + n * b.getWidth(); };
-        const auto Y = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
-        const float a = X (px (0)), h = X (px (1)), de = X (px (2)), r = X (px (3));
-        Path p; p.startNewSubPath (b.getX(), Y (0)); p.lineTo (a, Y (1)); p.lineTo (h, Y (1));
-        for (int i = 1; i <= 60; ++i) { const float t = (float) i / 60.0f; p.lineTo (h + (de - h) * t, Y (sus + (1 - sus) * std::pow (1 - t, c))); }
-        if (gate()) p.lineTo (r, Y (0));
-        fillUnder (g, p, b); stroke (g, p);
-        dot (g, a, Y (1)); dot (g, h, Y (1)); dot (g, de, Y (sus)); if (gate()) dot (g, r, Y (0));
+        const bool hold = val (Y (layer, LY_HOLD)) > 0.5f;
+        const float sus = hold ? val (Y (layer, LY_SUS)) : 0.0f, c = 0.6f + val (Y (layer, LY_CURVE)) * 5.4f;
+        const float a = b.getX() + ref (Y (layer, LY_ATT)).norm() * b.getWidth() * 0.2f;
+        const float e = a + ref (Y (layer, LY_LEN)).norm() * (b.getRight() - a);
+        const auto Yv = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
+        Path p; p.startNewSubPath (b.getX(), Yv (0)); p.lineTo (a, Yv (1));
+        for (int i = 1; i <= 60; ++i) { const float t = (float) i / 60.0f; p.lineTo (a + (e - a) * t, Yv (sus + (1 - sus) * std::pow (1 - t, c))); }
+        if (hold && sus > 0.0f) p.lineTo (b.getRight(), Yv (sus));
+        fillUnder (g, p, b); stroke (g, p); dot (g, e, Yv (sus));
     }
-    void mouseDown (const juce::MouseEvent& e) override
-    {
-        auto b = getLocalBounds().toFloat().reduced (6.0f);
-        const float n = (float) (e.x - b.getX()) / b.getWidth();
-        static const int order[4] = { M_ATT, M_HOLD, M_DEC, M_REL };
-        best = 0; float dist = 9;
-        for (int i = 0; i < 4; ++i) if (std::fabs (px (i) - n) < dist) { dist = std::fabs (px (i) - n); best = i; }
-        grabbed = order[best];
-        auto r = ref (grabbed); r.begin(); start = r.norm();
-        auto s = ref (M_SUS); s.begin(); sStart = s.norm();
-    }
-    void mouseDrag (const juce::MouseEvent& e) override
-    {
-        ref (grabbed).setNorm (start + 4.0f * (float) e.getDistanceFromDragStartX() / (float) getWidth());
-        if (best == 2) ref (M_SUS).setNorm (sStart - (float) e.getDistanceFromDragStartY() / (float) getHeight());
-    }
-    void mouseUp (const juce::MouseEvent&) override { ref (grabbed).end(); ref (M_SUS).end(); }
 private:
-    int grabbed = M_ATT, best = 0; float start = 0, sStart = 0;
+    int layer;
 };
 
 static float svfMag (int type, float f, float fc, float res)
@@ -420,56 +431,39 @@ static float xHz (float x, float l = 20.0f, float h = 20000.0f) { return l * std
 class FilterDisp : public XYDisp
 {
 public:
-    FilterDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_CUT), modeParam (ed.mode, M_RES), modeParam (ed.mode, M_FTYPE), modeParam (ed.mode, M_FENV) }, M_CUT, M_RES) {}
+    FilterDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_CUT)), modeParam (ed.mode, Y (l, LY_RES)), modeParam (ed.mode, Y (l, LY_FTYPE)), modeParam (ed.mode, Y (l, LY_FAMT)) }, Y (l, LY_CUT), Y (l, LY_RES)), layer (l) {}
     void draw (Graphics& g, Rectangle<float> b) override
     {
         const auto curve = [&] (float fc)
         {
-            Path p; const int type = (int) val (M_FTYPE);
+            Path p; const int type = (int) val (Y (layer, LY_FTYPE));
             for (int i = 0; i <= 120; ++i)
             {
-                const float x = (float) i / 120.0f, db = type == 3 ? 0.0f : 20.0f * std::log10 (svfMag (type, xHz (x), fc, val (M_RES)) + 1e-4f);
+                const float x = (float) i / 120.0f, db = type == 3 ? 0.0f : 20.0f * std::log10 (svfMag (type, xHz (x), fc, val (Y (layer, LY_RES))) + 1e-4f);
                 const float y = b.getY() + b.getHeight() * (0.3f - db / 60.0f);
                 if (i == 0) p.startNewSubPath (b.getX() + x * b.getWidth(), y); else p.lineTo (b.getX() + x * b.getWidth(), juce::jlimit (b.getY(), b.getBottom() + 2, y));
             }
             return p;
         };
-        const float fc = val (M_CUT);
-        if (std::fabs (val (M_FENV)) > 0.01f)
+        const float fc = val (Y (layer, LY_CUT));
+        if (std::fabs (val (Y (layer, LY_FAMT))) > 0.01f)
         {
             g.setColour (theme::dim.withAlpha (0.6f));
-            g.strokePath (curve (juce::jlimit (20.0f, 20000.0f, fc * std::pow (2.0f, val (M_FENV)))), juce::PathStrokeType (1.0f));
+            g.strokePath (curve (juce::jlimit (20.0f, 20000.0f, fc * std::pow (2.0f, val (Y (layer, LY_FAMT))))), juce::PathStrokeType (1.0f));
         }
         auto p = curve (fc); fillUnder (g, p, b); stroke (g, p);
     }
-};
-
-class ClickDisp : public XYDisp
-{
-public:
-    ClickDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_CLKLVL), modeParam (ed.mode, M_CLKLEN), modeParam (ed.mode, M_CLKNOISE), modeParam (ed.mode, M_CLKTONE) }, M_CLKLEN, M_CLKLVL) {}
-    void draw (Graphics& g, Rectangle<float> b) override
-    {
-        juce::Random r (7); Path p; const int N = (int) b.getWidth();
-        const float tau = val (M_CLKLEN), lvl = val (M_CLKLVL), nz = val (M_CLKNOISE), tone = val (M_CLKTONE);
-        for (int i = 0; i < N; ++i)
-        {
-            const float ms = (float) i / (float) N * 40.0f, e = std::exp (-ms / tau) * lvl;
-            const float s = (1 - nz) * std::sin (ms * 0.001f * tone * 6.283f * 0.18f) + nz * (r.nextFloat() * 2 - 1);
-            const float y = b.getCentreY() - e * s * b.getHeight() * 0.48f;
-            if (i == 0) p.startNewSubPath (b.getX(), y); else p.lineTo (b.getX() + (float) i, y);
-        }
-        stroke (g, p, 1.3f);
-    }
+private:
+    int layer;
 };
 
 class DriveDisp : public XYDisp
 {
 public:
-    DriveDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_DRV), modeParam (ed.mode, M_DRVTYPE) }, -1, M_DRV) {}
+    DriveDisp (Ed& ed, int l) : XYDisp (ed, { modeParam (ed.mode, Y (l, LY_DRV)), modeParam (ed.mode, Y (l, LY_DRVTYPE)) }, -1, Y (l, LY_DRV)), layer (l) {}
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const float gain = std::pow (10.0f, val (M_DRV) * 2.0f); const int t = (int) val (M_DRVTYPE);
+        const float gain = std::pow (10.0f, val (Y (layer, LY_DRV)) * 2.0f); const int t = (int) val (Y (layer, LY_DRVTYPE));
         g.setColour (theme::line); g.drawHorizontalLine ((int) b.getCentreY(), b.getX(), b.getRight());
         g.drawVerticalLine ((int) b.getCentreX(), b.getY(), b.getBottom());
         Path p;
@@ -481,23 +475,8 @@ public:
         }
         stroke (g, p);
     }
-};
-
-class SubDisp : public XYDisp
-{
-public:
-    SubDisp (Ed& ed) : XYDisp (ed, { modeParam (ed.mode, M_SUBLVL), modeParam (ed.mode, M_SUBOCT) }, -1, M_SUBLVL) {}
-    void draw (Graphics& g, Rectangle<float> b) override
-    {
-        const float cycles = 2.0f * std::pow (0.5f, std::round (val (M_SUBOCT))), l = val (M_SUBLVL);
-        Path p;
-        for (int i = 0; i <= 120; ++i)
-        {
-            const float t = (float) i / 120.0f, y = b.getCentreY() - std::sin (t * cycles * 6.283f) * l * b.getHeight() * 0.46f;
-            if (i == 0) p.startNewSubPath (b.getX(), y); else p.lineTo (b.getX() + t * b.getWidth(), y);
-        }
-        stroke (g, p, 2.5f);
-    }
+private:
+    int layer;
 };
 
 class ChordDisp : public Disp
@@ -548,10 +527,17 @@ struct TekkforgeEditor::Preview : public juce::Thread
             std::array<float, NUM_PARAMS> v; int note;
             { std::lock_guard<std::mutex> l (m); if (! pending) continue; v = want; note = wantNote; pending = false; }
             const int mode = (int) v[G_MODE]; const float* q = v.data() + modeParam (mode, 0);
-            const float body = (q[M_ATT] + q[M_LENGTH]) * 0.001f;
-            float wanted = body * 1.05f + (q[M_GATE] > 0.5f ? q[M_REL] * 0.001f : 0.0f) + 0.02f;
-            for (int o = 0; o < NUM_OSCS; ++o)
-                if (const auto* smp = p.samples[sampleSlot (mode, o)].load(); smp != nullptr && q[O (o, O_SRC)] > 0.5f && q[O (o, O_FREE)] > 0.5f)
+            float body = 0.02f, wanted = 0.05f;
+            for (int l = 0; l < NUM_LAYERS; ++l)
+            {
+                const float* y = q + Y (l, 0);
+                if (y[LY_MUTE] > 0.5f) continue;
+                const float len = (y[LY_ATT] + y[LY_LEN]) * 0.001f;
+                body = juce::jmax (body, len);
+                wanted = juce::jmax (wanted, len * 1.05f + y[LY_REL] * 0.001f + 0.02f);
+            }
+            for (int l = 0; l < NUM_LAYERS; ++l)
+                if (const auto* smp = p.samples[sampleSlot (mode, l)].load(); smp != nullptr && q[Y (l, LY_SRC)] > 0.5f && q[Y (l, LY_FREE)] > 0.5f)
                     wanted = juce::jmax (wanted, (float) smp->length() / smp->rate);
             const float secs = juce::jlimit (0.08f, 3.0f, wanted);
             const int n = (int) (secs * 44100.0f); L.assign ((size_t) n, 0); R.assign ((size_t) n, 0);
@@ -803,76 +789,309 @@ private:
     Ed& d; String title; std::vector<std::unique_ptr<juce::Component>> keep; std::vector<Knob*> knobs;
 };
 
-// ---------------- LFOs und Envs -------------------------------------------
-class LfoView : public Ticking
+class CurveEdit : public Ticking
 {
 public:
-    LfoView (Ed& ed, int index) : d (ed), lfo (index) {}
-    void tick() override { const float v = d.p.engine.sourceView[lfo].load (std::memory_order_relaxed); if (v != last) { last = v; repaint(); } }
+    CurveEdit (Ed& ed, int laneIndex) : d (ed), lane (laneIndex) {}
+    void tick() override
+    {
+        const float p = d.p.engine.lfoPos[lane].load (std::memory_order_relaxed);
+        if (p != lastPos) { lastPos = p; repaint(); }
+    }
     void paint (Graphics& g) override
     {
         auto o = getLocalBounds().toFloat();
         g.setColour (theme::well); g.fillRoundedRectangle (o, 6.0f);
         auto b = o.reduced (6.0f);
-        const int s = (int) d.p.rawValue (lfoParam (lfo, LF_SHAPE));
+        g.setColour (theme::line);
+        for (int i = 1; i < 16; ++i) { const float x = b.getX() + b.getWidth() * (float) i / 16.0f; g.drawVerticalLine ((int) x, b.getY(), b.getBottom()); }
+        const auto& c = d.p.curves[(size_t) lane];
         Path p;
-        for (int i = 0; i <= 160; ++i)
+        for (int i = 0; i < LFO_POINTS; ++i)
         {
-            const float t = (float) i / 160.0f, x = std::fmod (t * 2.0f, 1.0f); float y;
-            switch (s) { case 0: y = std::sin (6.2831853f * x); break; case 1: y = x < 0.25f ? 4 * x : x < 0.75f ? 2 - 4 * x : 4 * x - 4; break;
-                         case 2: y = 1 - 2 * x; break; case 3: y = x < 0.5f ? 1.0f : -1.0f; break;
-                         default: y = std::sin (std::floor (t * 12.0f) * 7.3f); break; }
-            const float px = b.getX() + t * b.getWidth(), py = b.getCentreY() - y * b.getHeight() * 0.44f;
-            if (i == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
+            const float x = b.getX() + b.getWidth() * (float) i / (float) (LFO_POINTS - 1), y = b.getBottom() - c[(size_t) i].load() * b.getHeight();
+            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
         }
+        Path f (p); f.lineTo (b.getRight(), b.getBottom()); f.lineTo (b.getX(), b.getBottom()); f.closeSubPath();
+        g.setColour (d.acc.withAlpha (0.18f)); g.fillPath (f);
         g.setColour (d.acc); g.strokePath (p, juce::PathStrokeType (2.0f));
-        const float dy = b.getCentreY() - last * b.getHeight() * 0.44f;
-        g.setColour (theme::ink); g.fillRoundedRectangle (b.getRight() - 6, dy - 3, 6, 6, 3);
+        g.setColour (theme::ink);
+        g.drawVerticalLine ((int) (b.getX() + b.getWidth() * lastPos), b.getY(), b.getBottom());
     }
+    void paintAt (const juce::MouseEvent& e)
+    {
+        auto b = getLocalBounds().toFloat().reduced (6.0f);
+        const int i = juce::jlimit (0, LFO_POINTS - 1, (int) std::round (((float) e.x - b.getX()) / b.getWidth() * (float) (LFO_POINTS - 1)));
+        const float y = juce::jlimit (0.0f, 1.0f, (b.getBottom() - (float) e.y) / b.getHeight());
+        const int a = prev < 0 ? i : prev;
+        const int lo = juce::jmin (a, i), hi = juce::jmax (a, i);
+        for (int k = lo; k <= hi; ++k)
+        {
+            const float t = hi == lo ? 1.0f : (float) (k - a) / (float) (i - a);
+            d.p.curves[(size_t) lane][(size_t) k].store (prevY + (y - prevY) * t);
+        }
+        prev = i; prevY = y; repaint();
+    }
+    void mouseDown (const juce::MouseEvent& e) override { prev = -1; paintAt (e); }
+    void mouseDrag (const juce::MouseEvent& e) override { paintAt (e); }
 private:
-    Ed& d; int lfo; float last = 2;
+    Ed& d; int lane, prev = -1; float prevY = 0, lastPos = -1;
 };
 
-class EnvView : public Disp
+// ---------------- Env und LFO wie in Vital --------------------------------
+/** Reiter einer Quelle: Klick waehlt sie aus, Ziehen auf einen Regler verbindet sie. */
+class SourceChip : public Ticking
 {
 public:
-    EnvView (Ed& ed, int index) : Disp (ed, { envParam (index, EV_ATT), envParam (index, EV_DEC), envParam (index, EV_SUS), envParam (index, EV_REL), envParam (index, EV_CURVE) }), env (index) {}
+    SourceChip (Ed& ed, int sourceIndex) : d (ed), src (sourceIndex) {}
+    bool selected() const { return src < NUM_LFOS ? d.e.lfoTab == src : d.e.envTab == src - NUM_LFOS; }
+    void paint (Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        const bool sel = selected();
+        g.setColour (sel ? d.acc : theme::well); g.fillRoundedRectangle (b, 5.0f);
+        const float v = juce::jlimit (0.0f, 1.0f, val);
+        g.setColour ((sel ? theme::well : d.acc).withAlpha (0.35f)); g.fillRoundedRectangle (b.withWidth (b.getWidth() * v), 5.0f);
+        g.setColour (sel ? theme::well : theme::ink); g.setFont (theme::font (13.0f, true));
+        g.drawText (U (sourceName (src)), b, juce::Justification::centred, false);
+    }
+    void tick() override
+    {
+        const float v = d.p.engine.sourceView[src].load (std::memory_order_relaxed);
+        if (std::fabs (v - val) > 0.01f) { val = v; repaint(); }
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (e.getDistanceFromDragStart() < 4) return;
+        if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor (this))
+            if (! c->isDragAndDropActive())
+                c->startDragging ("tkmod:" + String (src), this);
+    }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (e.mouseWasDraggedSinceMouseDown()) return;
+        if (src < NUM_LFOS) d.e.lfoTab = src; else d.e.envTab = src - NUM_LFOS;
+        d.e.requestRebuild();
+    }
+    juce::MouseCursor getMouseCursor() override { return juce::MouseCursor::DraggingHandCursor; }
+private:
+    Ed& d; int src; float val = 0;
+};
+
+/** Env-Anzeige mit ziehbaren Punkten: Attack, Decay und Sustain, Release. */
+class EnvEdit : public Disp
+{
+public:
+    EnvEdit (Ed& ed, int index) : Disp (ed, { envParam (index, EV_ATT), envParam (index, EV_DEC), envParam (index, EV_SUS), envParam (index, EV_REL), envParam (index, EV_CURVE) }), env (index) {}
+    PRef at (int k) const { return { d.p.param (envParam (env, k)) }; }
+    juce::Point<float> handle (int i, Rectangle<float> b) const
+    {
+        const float a = at (EV_ATT).norm() * 0.3f, de = a + at (EV_DEC).norm() * 0.3f, su = at (EV_SUS).norm(), r = de + 0.1f + at (EV_REL).norm() * 0.3f;
+        const float x = i == 0 ? a : i == 1 ? de : r, y = i == 0 ? 1.0f : i == 1 ? su : 0.0f;
+        return { b.getX() + x * b.getWidth(), b.getBottom() - y * b.getHeight() };
+    }
     void draw (Graphics& g, Rectangle<float> b) override
     {
-        const auto n = [&] (int k) { return d.p.param (envParam (env, k))->getValue(); };
-        const float a = n (EV_ATT) * 0.33f, de = a + n (EV_DEC) * 0.33f, su = n (EV_SUS), r = de + 0.1f + n (EV_REL) * 0.23f;
-        const float c = 0.6f + d.p.rawValue (envParam (env, EV_CURVE)) * 5.4f;
-        const auto X = [&] (float x) { return b.getX() + x * b.getWidth(); }; const auto Y = [&] (float v) { return b.getBottom() - v * b.getHeight(); };
-        Path p; p.startNewSubPath (X (0), Y (0)); p.lineTo (X (a), Y (1));
-        for (int i = 1; i <= 50; ++i) { const float t = (float) i / 50.0f; p.lineTo (X (a + (de - a) * t), Y (su + (1 - su) * std::pow (1 - t, c))); }
-        p.lineTo (X (de + 0.1f), Y (su));
-        for (int i = 1; i <= 30; ++i) { const float t = (float) i / 30.0f; p.lineTo (X (de + 0.1f + (r - de - 0.1f) * t), Y (su * std::pow (1 - t, 3.0f))); }
+        const float c = 0.6f + d.p.rawValue (envParam (env, EV_CURVE)) * 5.4f, su = at (EV_SUS).norm();
+        const auto a = handle (0, b), de = handle (1, b), r = handle (2, b);
+        Path p; p.startNewSubPath (b.getX(), b.getBottom()); p.lineTo (a);
+        for (int i = 1; i <= 50; ++i) { const float t = (float) i / 50.0f; p.lineTo (a.x + (de.x - a.x) * t, b.getBottom() - (su + (1 - su) * std::pow (1 - t, c)) * b.getHeight()); }
+        p.lineTo (de.x + b.getWidth() * 0.1f, de.y);
+        for (int i = 1; i <= 30; ++i) { const float t = (float) i / 30.0f; const float x0 = de.x + b.getWidth() * 0.1f; p.lineTo (x0 + (r.x - x0) * t, b.getBottom() - su * std::pow (1 - t, 3.0f) * b.getHeight()); }
         fillUnder (g, p, b); stroke (g, p);
+        for (int i = 0; i < 3; ++i) { const auto c2 = handle (i, b); dot (g, c2.x, c2.y); }
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const auto b = getLocalBounds().toFloat().reduced (6.0f);
+        float best = 1.0e9f; grabbed = 0;
+        for (int i = 0; i < 3; ++i) if (const float dist = handle (i, b).getDistanceFrom (e.position); dist < best) { best = dist; grabbed = i; }
+        static const int xp[3] = { EV_ATT, EV_DEC, EV_REL };
+        auto x = at (xp[grabbed]); x.begin(); sx = x.norm();
+        auto y = at (EV_SUS); y.begin(); sy = y.norm();
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        static const int xp[3] = { EV_ATT, EV_DEC, EV_REL };
+        at (xp[grabbed]).setNorm (sx + 3.3f * (float) e.getDistanceFromDragStartX() / (float) getWidth());
+        if (grabbed == 1) at (EV_SUS).setNorm (sy - (float) e.getDistanceFromDragStartY() / (float) getHeight());
+    }
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        static const int xp[3] = { EV_ATT, EV_DEC, EV_REL };
+        at (xp[grabbed]).end(); at (EV_SUS).end();
     }
 private:
-    int env;
+    int env, grabbed = 0; float sx = 0, sy = 0;
 };
 
-class LfoBox : public Ticking
+class EnvPanel : public Ticking
 {
 public:
-    LfoBox (Ed& ed, int i) : view (ed, i), shape (ed, lfoParam (i, LF_SHAPE)), sync (ed, lfoParam (i, LF_SYNC)), div (ed, lfoParam (i, LF_DIV), 4), retrig (ed, lfoParam (i, LF_RETRIG)),
-                             rate (ed, lfoParam (i, LF_HZ), "Tempo")
+    explicit EnvPanel (Ed& ed) : d (ed), edit (ed, ed.e.envTab)
     {
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &view, &shape, &sync, &div, &retrig, &rate }) addAndMakeVisible (c);
+        addAndMakeVisible (edit);
+        for (int i = 0; i < NUM_ENVS; ++i) { chips.push_back (std::make_unique<SourceChip> (d, NUM_LFOS + i)); addAndMakeVisible (*chips.back()); }
+        const std::pair<int, const char*> ks[] = { { EV_ATT, "Attack" }, { EV_DEC, "Decay" }, { EV_SUS, "Sustain" }, { EV_REL, "Release" }, { EV_CURVE, "Kurve" } };
+        for (auto& k : ks) { knobs.push_back (std::make_unique<Knob> (d, envParam (d.e.envTab, k.first), U (k.second))); addAndMakeVisible (*knobs.back()); }
+    }
+    void paint (Graphics& g) override { g.setColour (theme::plateHi.withAlpha (0.5f)); g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f); }
+    void resized() override
+    {
+        auto b = getLocalBounds().reduced (8);
+        auto tabs = b.removeFromTop (28); const int w = tabs.getWidth() / NUM_ENVS;
+        for (auto& c : chips) c->setBounds (tabs.removeFromLeft (w).withTrimmedRight (4));
+        auto row = b.removeFromBottom (78); const int kw = row.getWidth() / (int) knobs.size();
+        for (auto& k : knobs) k->setBounds (row.removeFromLeft (kw));
+        b.reduce (0, 4); edit.setBounds (b);
+    }
+    void tick() override { edit.tick(); for (auto& c : chips) c->tick(); for (auto& k : knobs) k->tick(); }
+private:
+    Ed& d; EnvEdit edit;
+    std::vector<std::unique_ptr<SourceChip>> chips;
+    std::vector<std::unique_ptr<Knob>> knobs;
+};
+
+class LfoPanel : public Ticking
+{
+public:
+    explicit LfoPanel (Ed& ed) : d (ed), lfo (ed.e.lfoTab), curve (ed, lfo), sync (ed, lfoParam (lfo, LF_SYNC)), trig (ed, lfoParam (lfo, LF_TRIG)),
+                                 div (ed, lfoParam (lfo, LF_DIV), 4), rate (ed, lfoParam (lfo, LF_HZ), "Tempo")
+    {
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &curve, &sync, &trig, &div, &rate }) addAndMakeVisible (c);
+        for (int i = 0; i < NUM_LFOS; ++i) { chips.push_back (std::make_unique<SourceChip> (d, i)); addAndMakeVisible (*chips.back()); }
+        static const char* shapes[] = { "Runter", "Hoch", "Dreieck", "Sinus", "Gate", "Zufall", "Leer" };
+        for (int i = 0; i < 7; ++i)
+        {
+            auto b = std::make_unique<juce::TextButton> (U (shapes[i]));
+            b->setColour (juce::TextButton::buttonColourId, theme::well); b->setColour (juce::TextButton::textColourOffId, theme::ink);
+            b->setColour (juce::ComboBox::outlineColourId, theme::line);
+            b->onClick = [this, i] { d.p.shapeLane (lfo, i); curve.repaint(); };
+            addAndMakeVisible (*b); shapeBtns.push_back (std::move (b));
+        }
+    }
+    void paint (Graphics& g) override { g.setColour (theme::plateHi.withAlpha (0.5f)); g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f); }
+    void resized() override
+    {
+        auto b = getLocalBounds().reduced (8);
+        auto tabs = b.removeFromTop (28); const int w = tabs.getWidth() / NUM_LFOS;
+        for (auto& c : chips) c->setBounds (tabs.removeFromLeft (w).withTrimmedRight (4));
+        b.removeFromTop (6);
+        auto side = b.removeFromRight (152); b.removeFromRight (6);
+        sync.setBounds (side.removeFromTop (24)); side.removeFromTop (3);
+        trig.setBounds (side.removeFromTop (24)); side.removeFromTop (3);
+        rate.setBounds (side.removeFromBottom (76)); side.removeFromBottom (3);
+        div.setBounds (side);
+        auto row = b.removeFromBottom (24); const int sw = row.getWidth() / 7;
+        for (auto& s : shapeBtns) s->setBounds (row.removeFromLeft (sw).reduced (1, 0));
+        b.removeFromBottom (4); curve.setBounds (b);
+    }
+    void tick() override
+    {
+        curve.tick(); sync.tick(); trig.tick(); div.tick(); rate.tick();
+        for (auto& c : chips) c->tick();
+        const bool synced = d.p.rawValue (lfoParam (lfo, LF_SYNC)) > 0.5f;
+        div.setAlpha (synced ? 1.0f : 0.35f); rate.setAlpha (synced ? 0.35f : 1.0f);
+    }
+private:
+    Ed& d; int lfo; CurveEdit curve; Strip sync, trig, div; Knob rate;
+    std::vector<std::unique_ptr<SourceChip>> chips;
+    std::vector<std::unique_ptr<juce::TextButton>> shapeBtns;
+};
+
+/** Eine Ebene als Zeile: alles, was den Klang dieser Ebene formt. */
+class ToggleBtn : public Ticking
+{
+public:
+    ToggleBtn (Ed& ed, int index, String label, Colour on) : d (ed), ref { ed.p.param (index) }, text (std::move (label)), onColour (on) {}
+    void paint (Graphics& g) override
+    {
+        const bool on = ref.norm() > 0.5f;
+        g.setColour (on ? onColour : theme::well); g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.0f);
+        g.setColour (on ? theme::well : theme::ink); g.setFont (theme::font (13.0f, true));
+        g.drawText (text, getLocalBounds(), juce::Justification::centred, false);
+    }
+    void mouseDown (const juce::MouseEvent&) override { ref.begin(); ref.setNorm (ref.norm() > 0.5f ? 0.0f : 1.0f); ref.end(); repaint(); }
+    void tick() override { const float v = ref.norm(); if (v != last) { last = v; repaint(); } }
+private:
+    Ed& d; PRef ref; String text; Colour onColour; float last = -1;
+};
+
+class LayerRow : public Ticking
+{
+public:
+    LayerRow (Ed& ed, int layerIndex) : d (ed), l (layerIndex),
+        mute (ed, modeParam (ed.mode, Y (l, LY_MUTE)), "M", theme::hot), solo (ed, modeParam (ed.mode, Y (l, LY_SOLO)), "S", ed.acc),
+        level (ed, modeParam (ed.mode, Y (l, LY_LVL)), U ("Pegel"))
+    {
+        addAndMakeVisible (mute); addAndMakeVisible (solo); addAndMakeVisible (level);
+        const auto add = [&] (const char* t) { panels.push_back (std::make_unique<Panel> (d, U (t))); addAndMakeVisible (*panels.back()); return panels.back().get(); };
+        const auto strip = [&] (Panel* p, int param, int w) { p->headStrip = p->own (std::make_unique<Strip> (d, modeParam (d.mode, Y (l, param)))); p->headWidth = w; };
+
+        auto* src = add ("Quelle"); src->oscIndex = l; src->fill = src->own (std::make_unique<WaveDisp> (d, l)); strip (src, LY_SRC, 130);
+        waveKnobs[0] = src->knob (Y (l, LY_WAVE), "Welle"); src->knob (Y (l, LY_TUNE), "Tune"); src->knob (Y (l, LY_FINE), "Fein");
+        waveKnobs[1] = src->knob (Y (l, LY_UNI), "Stimmen"); waveKnobs[2] = src->knob (Y (l, LY_DETUNE), "Verst."); waveKnobs[3] = src->knob (Y (l, LY_WIDTH), "Breite");
+
+        auto* amp = add ("Hüllkurve"); amp->fill = amp->own (std::make_unique<AmpDisp> (d, l)); strip (amp, LY_HOLD, 150);
+        amp->knob (Y (l, LY_LEN), "Länge"); amp->knob (Y (l, LY_ATT), "Attack"); amp->knob (Y (l, LY_CURVE), "Kurve");
+        susKnob = amp->knob (Y (l, LY_SUS), "Sustain"); amp->knob (Y (l, LY_REL), "Release");
+
+        auto* pit = add ("Pitch"); pit->fill = pit->own (std::make_unique<PitchDisp> (d, l));
+        pit->knob (Y (l, LY_PAMT), "Menge"); pit->knob (Y (l, LY_PTIME), "Zeit"); pit->knob (Y (l, LY_PCURVE), "Kurve");
+
+        auto* fil = add ("Filter"); fil->fill = fil->own (std::make_unique<FilterDisp> (d, l)); strip (fil, LY_FTYPE, 120);
+        filterKnobs[0] = fil->knob (Y (l, LY_CUT), "Cutoff"); filterKnobs[1] = fil->knob (Y (l, LY_RES), "Reso");
+        filterKnobs[2] = fil->knob (Y (l, LY_FAMT), "Env"); filterKnobs[3] = fil->knob (Y (l, LY_FDEC), "Zeit");
+
+        auto* drv = add ("Drive"); drv->fill = drv->own (std::make_unique<DriveDisp> (d, l)); strip (drv, LY_DRVTYPE, 96);
+        drv->knob (Y (l, LY_DRV), "Drive"); toneKnob = drv->knob (Y (l, LY_DRVTONE), "Ton");
+
+        auto* mix = add ("Mix"); strip (mix, LY_SUBOCT, 66);
+        mix->knob (Y (l, LY_SUB), "Sub"); mix->knob (Y (l, LY_LOWCUT), "Lowcut"); mix->knob (Y (l, LY_PAN), "Pan");
+
+        fxBtn.setButtonText ("FX");
+        fxBtn.setColour (juce::TextButton::buttonColourId, theme::well); fxBtn.setColour (juce::TextButton::textColourOffId, theme::ink);
+        fxBtn.setColour (juce::ComboBox::outlineColourId, theme::line);
+        fxBtn.onClick = [this] { d.e.fxScope = l + 1; d.e.selectedSlot = layerSlot (l, 0); d.e.showPage (2); };
+        addAndMakeVisible (fxBtn);
+    }
+    void paint (Graphics& g) override
+    {
+        g.setColour (theme::ink); g.setFont (theme::font (15.0f, true));
+        g.drawText (U (layerName (d.mode, l)), 2, 4, 90, 20, juce::Justification::centredLeft, false);
     }
     void resized() override
     {
         auto b = getLocalBounds();
-        div.setBounds (b.removeFromBottom (40)); b.removeFromBottom (2);
-        auto r = b.removeFromBottom (20); sync.setBounds (r.removeFromLeft (r.getWidth() / 2)); retrig.setBounds (r);
-        b.removeFromBottom (2);
-        shape.setBounds (b.removeFromBottom (20)); b.removeFromBottom (2);
-        rate.setBounds (b.removeFromRight (56)); view.setBounds (b);
+        auto head = b.removeFromLeft (90);
+        head.removeFromTop (26);
+        auto r = head.removeFromTop (26); mute.setBounds (r.removeFromLeft (28)); r.removeFromLeft (2); solo.setBounds (r.removeFromLeft (28)); r.removeFromLeft (2); fxBtn.setBounds (r.withTrimmedRight (2));
+        level.setBounds (head);
+        static const int widths[] = { 300, 240, 150, 196, 136, 0 };
+        for (size_t i = 0; i < panels.size(); ++i)
+        {
+            if (i + 1 == panels.size()) { panels[i]->setBounds (b); break; }
+            panels[i]->setBounds (b.removeFromLeft (widths[i]).withTrimmedRight (3));
+        }
     }
-    void tick() override { view.tick(); shape.tick(); sync.tick(); div.tick(); retrig.tick(); rate.tick(); }
+    void tick() override
+    {
+        mute.tick(); solo.tick(); level.tick();
+        for (auto& p : panels) p->tick();
+        const auto v = [&] (int p) { return d.p.rawValue (modeParam (d.mode, Y (l, p))); };
+        const bool off = v (LY_MUTE) > 0.5f;
+        for (auto& p : panels) p->setAlpha (off ? 0.45f : 1.0f);
+        const bool sample = v (LY_SRC) > 0.5f;
+        for (auto* k : waveKnobs) k->setAlpha (sample ? 0.3f : 1.0f);
+        const bool fOff = (int) v (LY_FTYPE) == 3;
+        for (auto* k : filterKnobs) k->setAlpha (fOff ? 0.3f : 1.0f);
+        toneKnob->setAlpha (v (LY_DRV) <= 0.0f ? 0.3f : 1.0f);
+        susKnob->setAlpha (v (LY_HOLD) > 0.5f ? 1.0f : 0.3f);
+    }
 private:
-    LfoView view; Strip shape, sync, div, retrig; Knob rate;
+    Ed& d; int l; ToggleBtn mute, solo; Knob level; juce::TextButton fxBtn;
+    std::vector<std::unique_ptr<Panel>> panels;
+    Knob* waveKnobs[4] {}; Knob* filterKnobs[4] {}; Knob* toneKnob = nullptr; Knob* susKnob = nullptr;
 };
 
 // ---------------- Seite: Synth ---------------------------------------------
@@ -880,66 +1099,12 @@ class SynthPage : public Ticking
 {
 public:
     SynthPage (Ed& ed, std::function<int (std::vector<float>&, std::vector<float>&, float&)> src, std::function<void (std::vector<float>&)> spec)
-        : d (ed), wave (d, src), spectrum (d, spec)
+        : d (ed), wave (d, src), spectrum (d, spec), env (d), lfo (d)
     {
-        addAndMakeVisible (wave); addAndMakeVisible (spectrum);
-        auto add = [&] (const String& t) { panels.push_back (std::make_unique<Panel> (d, t)); addAndMakeVisible (*panels.back()); return panels.back().get(); };
-
-        for (int o = 0; o < NUM_OSCS; ++o)
-        {
-            auto* p = add ("Oszillator " + String::charToString ((juce::juce_wchar) ('A' + o)));
-            p->oscIndex = o;
-            p->fill = p->own (std::make_unique<WaveDisp> (d, o));
-            p->headStrip = p->own (std::make_unique<Strip> (d, modeParam (d.mode, O (o, O_SRC)))); p->headWidth = 130;
-            p->knob (O (o, O_LVL), "Pegel"); p->knob (O (o, O_WAVE), "Welle"); p->knob (O (o, O_TUNE), "Tune"); p->knob (O (o, O_FINE), "Fein");
-            p->knob (O (o, O_UNI), "Stimmen"); p->knob (O (o, O_DETUNE), "Verst."); p->knob (O (o, O_WIDTH), "Breite");
-        }
-        auto* sub = add ("Sub"); sub->fill = sub->own (std::make_unique<SubDisp> (d));
-        sub->headStrip = sub->own (std::make_unique<Strip> (d, modeParam (d.mode, M_SUBOCT))); sub->headWidth = 100;
-        sub->knob (M_SUBLVL, "Lautstärke");
-
-        auto* out = add ("Ausgang");
-        out->knob (M_LOWCUT, "Lowcut"); out->knob (M_VEL, "Velocity"); out->knob (M_LEVEL, "Pegel");
-
-        auto* amp = add (U ("Lautstärke")); amp->fill = amp->own (std::make_unique<AmpDisp> (d));
-        amp->headStrip = amp->own (std::make_unique<Strip> (d, modeParam (d.mode, M_GATE))); amp->headWidth = 220;
-        amp->knob (M_LENGTH, "Länge"); amp->knob (M_ATT, "Attack"); amp->knob (M_HOLD, "Hold"); amp->knob (M_DEC, "Decay");
-        amp->knob (M_SUS, "Sustain"); amp->knob (M_REL, "Release"); amp->knob (M_ACURVE, "Kurve");
-
-        auto* pit = add (U ("Pitch-Hüllkurve")); pit->fill = pit->own (std::make_unique<PitchDisp> (d));
-        pit->knob (M_PAMT, "Menge"); pit->knob (M_PTIME, "Zeit"); pit->knob (M_PCURVE, "Kurve");
-
-        auto* fil = add ("Filter"); fil->fill = fil->own (std::make_unique<FilterDisp> (d));
-        fil->headStrip = fil->own (std::make_unique<Strip> (d, modeParam (d.mode, M_FTYPE))); fil->headWidth = 130;
-        fil->knob (M_CUT, "Cutoff"); fil->knob (M_RES, "Reso"); fil->knob (M_FENV, "Env"); fil->knob (M_FDEC, "Env Zeit");
-
-        if (modeIsMono (d.mode))
-        {
-            auto* clk = add ("Click"); clk->fill = clk->own (std::make_unique<ClickDisp> (d));
-            clk->knob (M_CLKLVL, "Pegel"); clk->knob (M_CLKTONE, "Ton"); clk->knob (M_CLKLEN, "Länge"); clk->knob (M_CLKNOISE, "Rauschen");
-        }
-        else
-        {
-            auto* cho = add ("Akkord");
-            cho->fill = cho->own (std::make_unique<ChordBox> (d));
-            cho->knob (M_STRUM, "Strum");
-        }
-        auto* drv = add ("Drive"); drv->fill = drv->own (std::make_unique<DriveDisp> (d));
-        drv->headStrip = drv->own (std::make_unique<Strip> (d, modeParam (d.mode, M_DRVTYPE))); drv->headWidth = 108;
-        drv->knob (M_DRV, "Drive"); drv->knob (M_DRVTONE, "Ton");
-
-        for (int i = 0; i < NUM_LFOS; ++i)
-        {
-            auto* p = add ("LFO " + String (i + 1));
-            p->fill = p->own (std::make_unique<LfoBox> (d, i));
-        }
-        for (int i = 0; i < NUM_ENVS; ++i)
-        {
-            auto* p = add ("Env " + String (i + 1));
-            p->fill = p->own (std::make_unique<EnvView> (d, i));
-            p->knobAbs (envParam (i, EV_ATT), "Attack"); p->knobAbs (envParam (i, EV_DEC), "Decay"); p->knobAbs (envParam (i, EV_SUS), "Sustain");
-            p->knobAbs (envParam (i, EV_REL), "Release"); p->knobAbs (envParam (i, EV_CURVE), "Kurve");
-        }
+        for (int l = 0; l < NUM_LAYERS; ++l) { rows.push_back (std::make_unique<LayerRow> (d, l)); addAndMakeVisible (*rows.back()); }
+        addAndMakeVisible (env); addAndMakeVisible (lfo); addAndMakeVisible (spectrum);
+        if (modeIsMono (d.mode)) addAndMakeVisible (wave);
+        else { chord = std::make_unique<ChordBox> (d); addAndMakeVisible (*chord); }
     }
     struct ChordBox : public Ticking
     {
@@ -951,24 +1116,24 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        auto topRow = b.removeFromTop (116);
-        wave.setBounds (topRow.removeFromLeft (topRow.getWidth() * 45 / 100)); topRow.removeFromLeft (8); spectrum.setBounds (topRow);
-        b.removeFromTop (8);
-        const int rowH = (b.getHeight() - 16) / 3;
-        auto r1 = b.removeFromTop (rowH); b.removeFromTop (8);
-        auto r2 = b.removeFromTop (rowH); b.removeFromTop (8);
-        const auto place = [] (juce::Rectangle<int>& row, Panel& p, int w) { p.setBounds (row.removeFromLeft (w)); row.removeFromLeft (8); };
-        size_t i = 0;
-        for (int o = 0; o < NUM_OSCS; ++o) place (r1, *panels[i++], 306);
-        place (r1, *panels[i++], 166); panels[i++]->setBounds (r1);
-        place (r2, *panels[i++], 400); place (r2, *panels[i++], 180); place (r2, *panels[i++], 270); place (r2, *panels[i++], 210); panels[i++]->setBounds (r2);
-        for (int k = 0; k < NUM_LFOS; ++k) place (b, *panels[i++], 186);
-        const int ew = (b.getWidth() - 16) / NUM_ENVS;
-        for (int k = 0; k < NUM_ENVS; ++k) place (b, *panels[i++], ew);
+        auto bottom = b.removeFromBottom (268); b.removeFromBottom (6);
+        const int h = (b.getHeight() - 8) / NUM_LAYERS;
+        for (auto& r : rows) { r->setBounds (b.removeFromTop (h)); b.removeFromTop (4); }
+        env.setBounds (bottom.removeFromLeft (380)); bottom.removeFromLeft (6);
+        lfo.setBounds (bottom.removeFromLeft (500)); bottom.removeFromLeft (6);
+        auto top = bottom.removeFromTop (bottom.getHeight() / 2 - 3); bottom.removeFromTop (6);
+        wave.setBounds (top); if (chord != nullptr) chord->setBounds (top);
+        spectrum.setBounds (bottom);
+    }
+    void tick() override
+    {
+        for (auto& r : rows) r->tick();
+        env.tick(); lfo.tick(); spectrum.tick();
+        if (chord != nullptr) chord->tick(); else wave.tick();
     }
 private:
-    Ed& d; WaveShapeView wave; Spectrum spectrum;
-    std::vector<std::unique_ptr<Panel>> panels;
+    Ed& d; WaveShapeView wave; Spectrum spectrum; EnvPanel env; LfoPanel lfo;
+    std::vector<std::unique_ptr<LayerRow>> rows; std::unique_ptr<ChordBox> chord;
 };
 
 // ---------------- Seite: FX ------------------------------------------------
@@ -1088,14 +1253,14 @@ private:
 class FxRow : public Ticking
 {
 public:
-    FxRow (Ed& ed, int slotIndex, std::function<void (int)> sel, std::function<void (int, int)> mv) : d (ed), slot (slotIndex), select (std::move (sel)), move (std::move (mv)) {}
+    FxRow (Ed& ed, int slotIndex, int firstSlot, int countSlots, std::function<void (int)> sel, std::function<void (int, int)> mv) : d (ed), slot (slotIndex), first (firstSlot), count (countSlots), select (std::move (sel)), move (std::move (mv)) {}
     void paint (Graphics& g) override
     {
         const int t = (int) d.p.rawValue (slotParam (slot, S_TYPE)); const bool on = d.p.rawValue (slotParam (slot, S_ON)) > 0.5f, sel = d.e.selectedSlot == slot;
         auto b = getLocalBounds().toFloat();
         g.setColour (sel ? d.acc.withAlpha (0.22f) : theme::plateHi.withAlpha (0.5f)); g.fillRoundedRectangle (b, 6.0f);
         if (sel) { g.setColour (d.acc); g.fillRoundedRectangle (b.withWidth (4.0f), 2.0f); }
-        g.setColour (theme::dim); g.setFont (theme::font (13.0f)); g.drawText (String (slot + 1), 12, 0, 18, getHeight(), juce::Justification::centredLeft, false);
+        g.setColour (theme::dim); g.setFont (theme::font (13.0f)); g.drawText (String (slot - first + 1), 12, 0, 18, getHeight(), juce::Justification::centredLeft, false);
         g.setColour (t != 0 && on ? theme::ink : theme::dim); g.setFont (theme::font (15.0f, t != 0));
         g.drawText (U (fxNames()[(size_t) t]), 34, 0, 150, getHeight(), juce::Justification::centredLeft, false);
         auto led = powerArea().toFloat().withSizeKeepingCentre (16, 16);
@@ -1117,7 +1282,7 @@ public:
     {
         if (powerArea().contains (e.getMouseDownPosition())) return;
         if (! e.mouseWasDraggedSinceMouseDown()) { select (slot); return; }
-        const int to = juce::jlimit (0, NUM_SLOTS - 1, slot + (int) std::floor ((float) e.y / (float) getHeight()));
+        const int to = juce::jlimit (first, first + count - 1, slot + (int) std::floor ((float) e.y / (float) getHeight()));
         if (to != slot) move (slot, to);
     }
     void tick() override
@@ -1126,7 +1291,7 @@ public:
         if (sum != last) { last = sum; repaint(); }
     }
 private:
-    Ed& d; int slot; float last = -1; std::function<void (int)> select; std::function<void (int, int)> move;
+    Ed& d; int slot, first, count; float last = -1; std::function<void (int)> select; std::function<void (int, int)> move;
 };
 
 /** Effektauswahl als Raster: Beim Wechsel starten die Regler mit sinnvollen Werten. */
@@ -1164,9 +1329,21 @@ class FxPage : public Ticking
 public:
     explicit FxPage (Ed& ed) : d (ed)
     {
-        for (int s = 0; s < NUM_SLOTS; ++s)
+        const int scope = d.e.fxScope;
+        const int firstSlot = scope == 0 ? 0 : layerSlot (scope - 1, 0), countSlots = scope == 0 ? NUM_MASTER_SLOTS : SLOTS_PER_LAYER;
+        if (d.e.selectedSlot < firstSlot || d.e.selectedSlot >= firstSlot + countSlots) d.e.selectedSlot = firstSlot;
+        for (int i = 0; i <= NUM_LAYERS; ++i)
         {
-            rows.push_back (std::make_unique<FxRow> (d, s, [this] (int x) { d.e.selectedSlot = x; d.e.requestRebuild(); },
+            auto b = std::make_unique<juce::TextButton> (i == 0 ? String ("Master") : U (layerName (d.mode, i - 1)));
+            b->setColour (juce::TextButton::buttonColourId, i == scope ? d.acc : theme::well);
+            b->setColour (juce::TextButton::textColourOffId, i == scope ? theme::well : theme::ink);
+            b->setColour (juce::ComboBox::outlineColourId, theme::line);
+            b->onClick = [this, i] { d.e.fxScope = i; d.e.requestRebuild(); };
+            addAndMakeVisible (*b); scopeTabs.push_back (std::move (b));
+        }
+        for (int s = firstSlot; s < firstSlot + countSlots; ++s)
+        {
+            rows.push_back (std::make_unique<FxRow> (d, s, firstSlot, countSlots, [this] (int x) { d.e.selectedSlot = x; d.e.requestRebuild(); },
                                                      [this] (int a, int b) { swap (a, b); }));
             addAndMakeVisible (*rows.back());
         }
@@ -1210,7 +1387,10 @@ public:
     {
         auto b = getLocalBounds();
         auto left = b.removeFromLeft (290); b.removeFromLeft (10);
-        const int h = left.getHeight() / NUM_SLOTS;
+        auto tabs = left.removeFromTop (34); const int tw = tabs.getWidth() / (int) scopeTabs.size();
+        for (auto& t : scopeTabs) t->setBounds (tabs.removeFromLeft (tw).withTrimmedRight (3));
+        left.removeFromTop (6);
+        const int h = juce::jmin (84, left.getHeight() / NUM_MASTER_SLOTS);
         for (auto& r : rows) r->setBounds (left.removeFromTop (h).reduced (0, 3));
         grid->setBounds (b.removeFromTop (96)); b.removeFromTop (8);
         auto row = b.removeFromBottom (92);
@@ -1223,210 +1403,16 @@ public:
 private:
     Ed& d;
     std::vector<std::unique_ptr<FxRow>> rows;
+    std::vector<std::unique_ptr<juce::TextButton>> scopeTabs;
     std::vector<std::unique_ptr<Knob>> knobs;
     std::unique_ptr<FxTypeGrid> grid; std::unique_ptr<Spectrum> analyzer; std::unique_ptr<FxVisual> visual;
-};
-
-// ---------------- Seite: Automation ----------------------------------------
-class CurveEdit : public Ticking
-{
-public:
-    CurveEdit (Ed& ed, int laneIndex) : d (ed), lane (laneIndex) {}
-    void tick() override
-    {
-        const float p = d.p.engine.lanePos[lane].load (std::memory_order_relaxed);
-        if (p != lastPos) { lastPos = p; repaint(); }
-    }
-    void paint (Graphics& g) override
-    {
-        auto o = getLocalBounds().toFloat();
-        g.setColour (theme::well); g.fillRoundedRectangle (o, 6.0f);
-        auto b = o.reduced (6.0f);
-        g.setColour (theme::line);
-        for (int i = 1; i < 16; ++i) { const float x = b.getX() + b.getWidth() * (float) i / 16.0f; g.drawVerticalLine ((int) x, b.getY(), b.getBottom()); }
-        const auto& c = d.p.curves[(size_t) lane];
-        Path p;
-        for (int i = 0; i < LANE_POINTS; ++i)
-        {
-            const float x = b.getX() + b.getWidth() * (float) i / (float) (LANE_POINTS - 1), y = b.getBottom() - c[(size_t) i].load() * b.getHeight();
-            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
-        }
-        Path f (p); f.lineTo (b.getRight(), b.getBottom()); f.lineTo (b.getX(), b.getBottom()); f.closeSubPath();
-        g.setColour (d.acc.withAlpha (0.18f)); g.fillPath (f);
-        g.setColour (d.acc); g.strokePath (p, juce::PathStrokeType (2.0f));
-        if (d.p.rawValue (laneParam (lane, L_ON)) > 0.5f)
-        {
-            g.setColour (theme::ink);
-            g.drawVerticalLine ((int) (b.getX() + b.getWidth() * lastPos), b.getY(), b.getBottom());
-        }
-    }
-    void paintAt (const juce::MouseEvent& e)
-    {
-        auto b = getLocalBounds().toFloat().reduced (6.0f);
-        const int i = juce::jlimit (0, LANE_POINTS - 1, (int) std::round (((float) e.x - b.getX()) / b.getWidth() * (float) (LANE_POINTS - 1)));
-        const float y = juce::jlimit (0.0f, 1.0f, (b.getBottom() - (float) e.y) / b.getHeight());
-        const int a = prev < 0 ? i : prev;
-        const int lo = juce::jmin (a, i), hi = juce::jmax (a, i);
-        for (int k = lo; k <= hi; ++k)
-        {
-            const float t = hi == lo ? 1.0f : (float) (k - a) / (float) (i - a);
-            d.p.curves[(size_t) lane][(size_t) k].store (prevY + (y - prevY) * t);
-        }
-        prev = i; prevY = y; repaint();
-    }
-    void mouseDown (const juce::MouseEvent& e) override { prev = -1; paintAt (e); }
-    void mouseDrag (const juce::MouseEvent& e) override { paintAt (e); }
-private:
-    Ed& d; int lane, prev = -1; float prevY = 0, lastPos = -1;
-};
-
-class LaneRow : public Ticking
-{
-public:
-    LaneRow (Ed& ed, int laneIndex) : d (ed), lane (laneIndex), curve (ed, laneIndex), on (ed, laneParam (laneIndex, L_ON)),
-          rate (ed, laneParam (laneIndex, L_RATE), 4), trig (ed, laneParam (laneIndex, L_TRIG)), amount (ed, laneParam (laneIndex, L_AMOUNT), "Menge")
-    {
-        for (auto* c : std::initializer_list<juce::Component*> { &curve, &on, &rate, &trig, &amount, &target, &learn }) addAndMakeVisible (c);
-        style (target); style (learn);
-        target.onClick = [this] { pick(); };
-        learn.setButtonText (d.e.learnLane == lane ? U ("Klick jetzt einen Regler") : U ("Ziel per Klick"));
-        learn.onClick = [this] { d.e.learnLane = d.e.learnLane == lane ? -1 : lane; d.e.showPage (d.e.learnLane >= 0 ? 0 : 4); };
-        static const char* shapes[] = { "Runter", "Hoch", "Dreieck", "Sinus", "Gate", "Zufall", "Leer" };
-        for (int i = 0; i < 7; ++i)
-        {
-            auto b = std::make_unique<juce::TextButton> (U (shapes[i])); style (*b);
-            b->onClick = [this, i] { d.p.shapeLane (lane, i); curve.repaint(); };
-            addAndMakeVisible (*b); shape.push_back (std::move (b));
-        }
-        refresh();
-    }
-    void style (juce::TextButton& b)
-    {
-        b.setColour (juce::TextButton::buttonColourId, theme::well); b.setColour (juce::TextButton::textColourOffId, theme::ink);
-        b.setColour (juce::ComboBox::outlineColourId, theme::line);
-    }
-    void refresh() { target.setButtonText (d.p.targetName ((int) d.p.rawValue (laneParam (lane, L_TARGET)))); }
-    void pick()
-    {
-        juce::PopupMenu m, modeMenu, fx, glob;
-        m.addItem (1, U ("Kein Ziel"));
-        const auto& t = params();
-        for (int i = 0; i < M_COUNT; ++i) if (t[(size_t) modeParam (d.mode, i)].modulatable()) modeMenu.addItem (modeParam (d.mode, i) + 2, U (t[(size_t) modeParam (d.mode, i)].name));
-        m.addSubMenu (U (modeName (d.mode)), modeMenu);
-        for (int s = 0; s < NUM_SLOTS; ++s)
-        {
-            const int ty = (int) d.p.rawValue (slotParam (s, S_TYPE)); if (ty == 0) continue;
-            juce::PopupMenu sm;
-            sm.addItem (slotParam (s, S_MIX) + 2, "Mix");
-            for (int k = 0; k < FX_PARAMS; ++k) if (fxInfo (ty)[k].label[0]) sm.addItem (slotParam (s, S_P1 + k) + 2, U (fxInfo (ty)[k].label));
-            m.addSubMenu ("FX " + String (s + 1) + " " + U (fxNames()[(size_t) ty]), sm);
-        }
-        m.addItem (G_MASTER + 2, "Master");
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target), [this] (int r)
-        {
-            if (r == 0) return;
-            auto* p = d.p.param (laneParam (lane, L_TARGET));
-            p->setValueNotifyingHost (p->convertTo0to1 ((float) (r - 2)));
-            auto* o = d.p.param (laneParam (lane, L_ON));
-            if (r >= 2) o->setValueNotifyingHost (1.0f);
-            refresh();
-        });
-    }
-    void paint (Graphics& g) override
-    {
-        g.setColour (theme::plateHi.withAlpha (0.5f)); g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f);
-    }
-    void resized() override
-    {
-        auto b = getLocalBounds().reduced (8);
-        auto left = b.removeFromLeft (320); b.removeFromLeft (8);
-        auto r = left.removeFromTop (26); on.setBounds (r.removeFromLeft (84)); r.removeFromLeft (6); target.setBounds (r);
-        left.removeFromTop (5);
-        auto r2 = left.removeFromTop (26); learn.setBounds (r2); left.removeFromTop (5);
-        amount.setBounds (left.removeFromRight (70));
-        rate.setBounds (left.removeFromTop (juce::jmin (52, left.getHeight() - 28))); trig.setBounds (left.removeFromTop (26).withTrimmedRight (0));
-        auto sh = b.removeFromBottom (26); const int w = sh.getWidth() / 7;
-        for (auto& s : shape) s->setBounds (sh.removeFromLeft (w).reduced (2, 0));
-        b.removeFromBottom (4); curve.setBounds (b);
-    }
-private:
-    Ed& d; int lane; CurveEdit curve; Strip on, rate, trig; Knob amount; juce::TextButton target, learn;
-    std::vector<std::unique_ptr<juce::TextButton>> shape;
-};
-
-class AutoPage : public Ticking
-{
-public:
-    explicit AutoPage (Ed& ed)
-    {
-        for (int l = 0; l < NUM_LANES; ++l) { rows.push_back (std::make_unique<LaneRow> (ed, l)); addAndMakeVisible (*rows.back()); }
-    }
-    void resized() override
-    {
-        auto b = getLocalBounds(); const int h = b.getHeight() / NUM_LANES;
-        for (auto& r : rows) r->setBounds (b.removeFromTop (h).reduced (0, 4));
-    }
-private:
-    std::vector<std::unique_ptr<LaneRow>> rows;
-};
-
-// ---------------- Quellen-Leiste: immer sichtbar, von hier auf Regler ziehen ----
-class SourceChip : public Ticking
-{
-public:
-    SourceChip (Ed& ed, int sourceIndex) : d (ed), src (sourceIndex) {}
-    void paint (Graphics& g) override
-    {
-        auto b = getLocalBounds().toFloat();
-        g.setColour (theme::well); g.fillRoundedRectangle (b, 5.0f);
-        const float v = src < NUM_LFOS ? 0.5f + 0.5f * val : val;
-        g.setColour (d.acc.withAlpha (0.35f)); g.fillRoundedRectangle (b.withWidth (b.getWidth() * juce::jlimit (0.0f, 1.0f, v)), 5.0f);
-        g.setColour (theme::ink); g.setFont (theme::font (13.0f, true));
-        g.drawText (U (sourceName (src)), b, juce::Justification::centred, false);
-    }
-    void tick() override
-    {
-        const float v = d.p.engine.sourceView[src].load (std::memory_order_relaxed);
-        if (std::fabs (v - val) > 0.01f) { val = v; repaint(); }
-    }
-    void mouseDrag (const juce::MouseEvent&) override
-    {
-        if (auto* c = juce::DragAndDropContainer::findParentDragContainerFor (this))
-            if (! c->isDragAndDropActive())
-                c->startDragging ("tkmod:" + String (src), this);
-    }
-    void mouseUp (const juce::MouseEvent& e) override { if (! e.mouseWasDraggedSinceMouseDown()) d.e.showPage (3); }
-    juce::MouseCursor getMouseCursor() override { return juce::MouseCursor::DraggingHandCursor; }
-private:
-    Ed& d; int src; float val = 0;
-};
-
-class SourceStrip : public Ticking
-{
-public:
-    explicit SourceStrip (Ed& ed)
-    {
-        for (int s = 0; s < NUM_SOURCES; ++s) { chips.push_back (std::make_unique<SourceChip> (ed, s)); addAndMakeVisible (*chips.back()); }
-    }
-    void paint (Graphics& g) override
-    {
-        g.setColour (theme::dim); g.setFont (theme::font (13.0f));
-        g.drawText (U ("Auf einen Regler ziehen:"), 0, 0, 170, getHeight(), juce::Justification::centredLeft, false);
-    }
-    void resized() override
-    {
-        auto b = getLocalBounds().withTrimmedLeft (174); const int w = b.getWidth() / NUM_SOURCES;
-        for (auto& c : chips) c->setBounds (b.removeFromLeft (w).reduced (3, 2));
-    }
-private:
-    std::vector<std::unique_ptr<SourceChip>> chips;
 };
 
 // ---------------- Seite: Sample --------------------------------------------
 class SampleWave : public Ticking
 {
 public:
-    explicit SampleWave (Ed& ed) : d (ed), osc (ed.e.sampleOsc), start { ed.p.param (modeParam (ed.mode, O (ed.e.sampleOsc, O_START))) }
+    explicit SampleWave (Ed& ed) : d (ed), osc (ed.e.sampleOsc), start { ed.p.param (modeParam (ed.mode, Y (ed.e.sampleOsc, LY_START))) }
     {
         if (const auto* s = current()) report = analyzeSample (*s);
     }
@@ -1565,10 +1551,10 @@ static void styleButton (juce::TextButton& b)
 class SamplePage : public Ticking
 {
 public:
-    explicit SamplePage (Ed& ed) : d (ed), wave (ed), osc (ed.e.sampleOsc), pitch (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_PITCH))), loop (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_LOOP))), len (ed, modeParam (ed.mode, O (ed.e.sampleOsc, O_FREE)))
+    explicit SamplePage (Ed& ed) : d (ed), wave (ed), osc (ed.e.sampleOsc), pitch (ed, modeParam (ed.mode, Y (ed.e.sampleOsc, LY_PITCH))), loop (ed, modeParam (ed.mode, Y (ed.e.sampleOsc, LY_LOOP))), len (ed, modeParam (ed.mode, Y (ed.e.sampleOsc, LY_FREE)))
     {
         addAndMakeVisible (wave); addAndMakeVisible (pitch); addAndMakeVisible (loop); addAndMakeVisible (len);
-        for (auto [p, n] : std::initializer_list<std::pair<int, const char*>> { { O (osc, O_LVL), "Pegel" }, { O (osc, O_TUNE), "Tune" }, { O (osc, O_FINE), "Fein" }, { O (osc, O_ROOT), "Grundton" }, { O (osc, O_START), "Start" } })
+        for (auto [p, n] : std::initializer_list<std::pair<int, const char*>> { { Y (osc, LY_LVL), "Pegel" }, { Y (osc, LY_TUNE), "Tune" }, { Y (osc, LY_FINE), "Fein" }, { Y (osc, LY_ROOT), "Grundton" }, { Y (osc, LY_START), "Start" } })
         {
             knobs.push_back (std::make_unique<Knob> (d, modeParam (d.mode, p), U (n)));
             addAndMakeVisible (*knobs.back());
@@ -1577,9 +1563,9 @@ public:
         load.setButtonText (U ("Sample laden")); clear.setButtonText (U ("Sample entfernen"));
         load.onClick = [this] { d.e.chooseSample (osc); };
         clear.onClick = [this] { d.p.clearSample (d.mode, osc); d.e.status = {}; };
-        for (int o = 0; o < NUM_OSCS; ++o)
+        for (int o = 0; o < NUM_LAYERS; ++o)
         {
-            auto b = std::make_unique<juce::TextButton> ("Oszillator " + String::charToString ((juce::juce_wchar) ('A' + o)));
+            auto b = std::make_unique<juce::TextButton> (U (layerName (d.mode, o)));
             styleButton (*b);
             if (o == osc) { b->setColour (juce::TextButton::buttonColourId, d.acc); b->setColour (juce::TextButton::textColourOffId, theme::well); }
             b->onClick = [this, o] { d.e.sampleOsc = o; d.e.status = {}; d.e.requestRebuild(); };
@@ -1612,7 +1598,7 @@ public:
         g.drawText (U ("Loop"), 0, y0 + 64, 300, 20, juce::Justification::centredLeft, false);
         g.drawText (U ("Länge bestimmt"), 0, y0 + 124, 300, 20, juce::Justification::centredLeft, false);
         g.setColour (theme::dim); g.setFont (theme::font (13.0f));
-        const String hint = d.e.status.isNotEmpty() ? d.e.status : U ("Jeder Oszillator hat sein eigenes Sample. Es läuft durch Filter, Drive und FX und wird im Projekt und im Preset mitgespeichert.");
+        const String hint = d.e.status.isNotEmpty() ? d.e.status : U ("Jede Ebene hat ihr eigenes Sample. Es läuft durch Filter, Drive und FX und wird im Projekt und im Preset mitgespeichert.");
         g.drawText (hint, 410, y0 + 150, getWidth() - 620, 40, juce::Justification::centredLeft, true);
     }
 private:
@@ -1677,15 +1663,15 @@ public:
         auto list = getLocalBounds().withTrimmedTop (32);
         const int rowW = (list.getWidth() - 8) / 2;
         for (int i = 0; i < (int) rows.size(); ++i)
-            rows[(size_t) i]->setBounds (list.getX() + (i / 8) * (rowW + 8), list.getY() + (i % 8) * 40, rowW, 34);
+            rows[(size_t) i]->setBounds (list.getX() + (i / 16) * (rowW + 8), list.getY() + (i % 16) * 40, rowW, 34);
     }
     void paint (Graphics& g) override
     {
         g.setColour (theme::ink); g.setFont (theme::font (16.0f, true));
-        g.drawText (U ("Verbindungen"), 0, 2, 300, 22, juce::Justification::centredLeft, false);
+        g.drawText (U ("Matrix"), 0, 2, 300, 22, juce::Justification::centredLeft, false);
         if (! rows.empty()) return;
         g.setColour (theme::dim); g.setFont (theme::font (16.0f));
-        g.drawText (U ("Noch keine Verbindung. Zieh einen LFO oder eine Env aus der Leiste unten auf einen Regler."), getLocalBounds(), juce::Justification::centred, false);
+        g.drawText (U ("Noch keine Verbindung. Zieh auf der Seite Synth den Reiter eines LFOs oder einer Env auf einen Regler."), getLocalBounds(), juce::Justification::centred, false);
     }
 private:
     Ed& d; std::vector<std::unique_ptr<ModRow>> rows; int hash = 0;
@@ -1833,7 +1819,7 @@ public:
                 recipeTabs.push_back (std::move (b));
             }
             int useOsc = -1;
-            for (int o = NUM_OSCS - 1; o >= 0; --o) if (d.p.samples[sampleSlot (d.mode, o)].load() != nullptr) useOsc = o;
+            for (int o = NUM_LAYERS - 1; o >= 0; --o) if (d.p.samples[sampleSlot (d.mode, o)].load() != nullptr) useOsc = o;
             if (useOsc >= 0)
             {
                 hasSample = true; report = analyzeSample (*d.p.samples[sampleSlot (d.mode, useOsc)].load()); advice = suggestSettings (d.mode, report, useOsc);
@@ -1978,8 +1964,9 @@ public:
     {
         addAndMakeVisible (quality); addAndMakeVisible (master);
     }
-    Rectangle<int> modeArea() const { return { 136, 8, 400, 50 }; }
-    Rectangle<int> pageArea() const { return { 544, 8, 386, 50 }; }
+    Rectangle<int> modeArea() const { return { 136, 8, 300, 50 }; }
+    Rectangle<int> pageArea() const { return { 444, 8, 390, 50 }; }
+    Rectangle<int> auditionArea() const { return { 840, 16, 86, 34 }; }
     void resized() override
     {
         quality.setBounds (932, 16, 96, 30);
@@ -1997,17 +1984,23 @@ public:
             const Colour c = theme::accent (m); const bool sel = m == d.mode;
             g.setColour (sel ? c : theme::well); g.fillRoundedRectangle (r, 6.0f);
             g.setColour (sel ? theme::well : c); g.setFont (theme::font (14.0f, true));
-            g.drawText (U (m == 0 ? "Melo" : m == 1 ? "Stab" : m == 2 ? "Topkick" : m == 3 ? "Kickbass" : "Full Kick"), r, juce::Justification::centred, false);
+            g.drawText (U (modeName (m)), r, juce::Justification::centred, false);
         }
-        static const char* pages[] = { "Synth", "Sample", "FX", "Mod", "Auto", "Guide", "Presets" };
-        auto pa = pageArea(); const int pw = pa.getWidth() / 7;
-        for (int i = 0; i < 7; ++i)
+        static const char* pages[] = { "Synth", "Sample", "FX", "Matrix", "Guide", "Presets" };
+        auto pa = pageArea(); const int pw = pa.getWidth() / 6;
+        for (int i = 0; i < 6; ++i)
         {
             auto r = pa.removeFromLeft (pw).reduced (2, 8).toFloat();
             const bool sel = i == e.getPage();
             g.setColour (sel ? theme::ink : theme::plateHi); g.fillRoundedRectangle (r, 5.0f);
             g.setColour (sel ? theme::well : theme::ink); g.setFont (theme::font (13.0f, sel));
             g.drawFittedText (pages[i], r.toNearestInt().reduced (1, 0), juce::Justification::centred, 1, 0.8f);
+        }
+        {
+            auto r = auditionArea().toFloat();
+            g.setColour (e.auditionOn ? d.acc : theme::well); g.fillRoundedRectangle (r, 5.0f);
+            g.setColour (e.auditionOn ? theme::well : theme::ink); g.setFont (theme::font (13.0f, e.auditionOn));
+            g.drawText (U ("Vorhören"), r, juce::Justification::centred, false);
         }
         // Note und Frequenz fuer sauberes Stimmen
         const int note = d.p.lastNote.load();
@@ -2039,7 +2032,8 @@ public:
             PRef r { d.p.param (G_MODE) }; r.begin(); r.setReal ((float) m); r.end();
         }
         else if (pageArea().contains (ev.getPosition()))
-            e.showPage ((ev.x - pageArea().getX()) * 7 / pageArea().getWidth());
+            e.showPage ((ev.x - pageArea().getX()) * 6 / pageArea().getWidth());
+        else if (auditionArea().contains (ev.getPosition())) { e.auditionOn = ! e.auditionOn; repaint(); }
     }
     void tick() override
     {
@@ -2076,7 +2070,7 @@ TekkforgeEditor::TekkforgeEditor (TekkforgeProcessor& p) : AudioProcessorEditor 
 TekkforgeEditor::~TekkforgeEditor()
 {
     stopTimer();
-    top.reset(); page.reset(); sources.reset();
+    top.reset(); page.reset();
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
     setLookAndFeel (nullptr);
 }
@@ -2085,7 +2079,7 @@ void TekkforgeEditor::rebuild()
 {
     const int mode = (int) proc.rawValue (G_MODE);
     lastMode = mode;
-    page.reset(); top.reset(); sources.reset();
+    page.reset(); top.reset();
     lastTheme = theme::current; lastSample = proc.sampleVersion.load(); lastPreviewNote = -1;
     keys->setColour (juce::MidiKeyboardComponent::whiteNoteColourId, theme::plateHi);
     keys->setColour (juce::MidiKeyboardComponent::blackNoteColourId, theme::well.getBrightness() > 0.5f ? theme::ink : theme::well);   // helles Design: dunkle Tasten
@@ -2099,8 +2093,6 @@ void TekkforgeEditor::rebuild()
 
     top = std::make_unique<TopBar> (*this, d);
     addAndMakeVisible (*top);
-    sources = std::make_unique<SourceStrip> (d);
-    addAndMakeVisible (*sources);
 
     auto* pv = preview.get();
     auto waveSrc = [pv] (std::vector<float>& lo, std::vector<float>& hi, float& len)
@@ -2116,9 +2108,8 @@ void TekkforgeEditor::rebuild()
         case 1:  page = std::make_unique<SamplePage> (d); break;
         case 2:  page = std::make_unique<FxPage> (d); break;
         case 3:  page = std::make_unique<ModPage> (d); break;
-        case 4:  page = std::make_unique<AutoPage> (d); break;
-        case 5:  page = std::make_unique<GuidePage> (d, specSrc); break;
-        case 6:  page = std::make_unique<PresetsPage> (d); break;
+        case 4:  page = std::make_unique<GuidePage> (d, specSrc); break;
+        case 5:  page = std::make_unique<PresetsPage> (d); break;
         default: page = std::make_unique<SynthPage> (d, waveSrc, specSrc); break;
     }
     addAndMakeVisible (*page);
@@ -2133,11 +2124,6 @@ void TekkforgeEditor::showPage (int p) { pageIndex = p; requestRebuild(); }
 void TekkforgeEditor::paint (Graphics& g)
 {
     g.fillAll (theme::plate);
-    if (learnLane >= 0)
-    {
-        g.setColour (theme::accent ((int) proc.rawValue (G_MODE)));
-        g.drawRect (getLocalBounds(), 3);
-    }
 }
 
 void TekkforgeEditor::resized()
@@ -2145,8 +2131,7 @@ void TekkforgeEditor::resized()
     auto b = getLocalBounds();
     if (top != nullptr) top->setBounds (b.removeFromTop (66));
     keys->setBounds (b.removeFromBottom (72).reduced (10, 0).withTrimmedBottom (8));
-    if (sources != nullptr) sources->setBounds (b.removeFromBottom (32).reduced (10, 1));
-    if (update != nullptr) update->setBounds (10, b.getBottom() + 2, 170, 28);
+    if (update != nullptr) update->setBounds (932, 47, 96, 17);
     if (page != nullptr) page->setBounds (b.reduced (10, 4));
 }
 
@@ -2171,9 +2156,10 @@ void TekkforgeEditor::loadSampleFile (const juce::File& file, int osc)
             auto* x = proc.param (modeParam (mode, p));
             x->beginChangeGesture(); x->setValueNotifyingHost (x->convertTo0to1 (real)); x->endChangeGesture();
         };
-        set (O (osc, O_SRC), 1.0f);
-        if (proc.rawValue (modeParam (mode, O (osc, O_LVL))) <= 0.0f) set (O (osc, O_LVL), 1.0f);
-        status = msg.isNotEmpty() ? msg : U ("Sample geladen. Es läuft auf diesem Oszillator, die anderen bleiben aktiv.");
+        set (Y (osc, LY_SRC), 1.0f);
+        set (Y (osc, LY_MUTE), 0.0f);
+        if (proc.rawValue (modeParam (mode, Y (osc, LY_LVL))) <= 0.0f) set (Y (osc, LY_LVL), 1.0f);
+        status = msg.isNotEmpty() ? msg : U ("Sample geladen. Es läuft auf dieser Ebene, die anderen bleiben aktiv.");
     }
     else status = msg;
     sampleOsc = osc;
@@ -2259,10 +2245,19 @@ void TekkforgeEditor::timerCallback()
 
     float now[NUM_PARAMS]; proc.snapshot (now);
     bool changed = false;
-    for (int i = 0; i < NUM_PARAMS; ++i) if (now[i] != lastValues[i]) { changed = true; lastValues[i] = now[i]; }
+    bool soundChanged = false;
+    for (int i = 0; i < NUM_PARAMS; ++i)
+        if (now[i] != lastValues[i])
+        {
+            changed = true; lastValues[i] = now[i];
+            if (i >= MODE_BASE && i < LFO_BASE) soundChanged = true;
+        }
+    // Vorhoeren: kurz nach dem Drehen die Note anspielen, damit man jede Aenderung hoert
+    const auto nowMs = juce::Time::getMillisecondCounter();
+    if (soundChanged && lastPreviewNote >= 0) { auditionDue = true; auditionAt = nowMs + 120; }
+    if (auditionDue && nowMs >= auditionAt) { auditionDue = false; if (auditionOn) proc.auditionNow.store (true); }
     const int defaultNote = modeIsMono (mode) ? 29 : 60;
     const int ln = proc.lastNote.load(), note = ln >= 0 ? ln : defaultNote;
-    if (auto* t = dynamic_cast<Ticking*> (sources.get())) t->tick();
     if (changed || note != lastPreviewNote) { lastPreviewNote = note; preview->request (now, note); }
 
     if (auto* t = dynamic_cast<Ticking*> (page.get())) t->tick();

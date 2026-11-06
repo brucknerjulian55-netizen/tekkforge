@@ -127,66 +127,52 @@ inline SampleReport analyzeSample (const SampleData& s)
 struct Suggestion { int index; float value; std::string why; };
 struct SuggestionSet { std::vector<Suggestion> items; int playNote = 29; };
 
-/** Vorschlaege fuer den aktuellen Modus. Faustregeln als Startpunkt, kein Ersatz fuers Ohr. */
-inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int osc = 0)
+/** Vorschlaege fuer eine Ebene. Faustregeln als Startpunkt, kein Ersatz fuers Ohr. */
+inline SuggestionSet suggestSettings (int mode, const SampleReport& r, int layer = 0)
 {
     SuggestionSet out;
-    const auto add = [&] (int p, float v, std::string why = {}) { out.items.push_back ({ modeParam (mode, p), v, std::move (why) }); };
+    const auto add = [&] (int p, float v, std::string why = {}) { out.items.push_back ({ modeParam (mode, Y (layer, p)), v, std::move (why) }); };
     const float bass = r.band[0] + r.band[1];
-
     const auto tuneTo = [&] (float targetHz)
     {
-        add (O (osc, O_PITCH), 1);
-        if (! r.tonal) { add (O (osc, O_ROOT), 29); add (O (osc, O_TUNE), 0); out.playNote = 29; return; }
+        add (LY_PITCH, 1);
+        if (! r.tonal) { add (LY_ROOT, 29); add (LY_TUNE, 0); out.playNote = 29; return; }
         const int oct = (int) std::round (std::log2 (r.hz / targetHz));
-        add (O (osc, O_ROOT), (float) r.note, "Grundton auf den gemessenen Ton gesetzt");
-        add (O (osc, O_TUNE), -r.cents / 100.0f, "Feinstimmung gleicht die Abweichung aus");
+        add (LY_ROOT, (float) r.note, "Grundton auf den gemessenen Ton gesetzt");
+        add (LY_TUNE, -r.cents / 100.0f, "Feinstimmung gleicht die Abweichung aus");
         out.playNote = std::clamp (r.note - 12 * oct, 12, 108);
     };
-
-    switch (mode)
+    if (mode == KICK && layer == 0)
     {
-        case KICKBASS:
-            tuneTo (52.0f);
-            add (O (osc, O_FREE), 0, "Die Hüllkurve bestimmt die Länge, damit der Schwanz vor der nächsten Kick endet");
-            add (M_GATE, 2, "Spielart Notenlänge: Die Note im Piano Roll bestimmt die Länge des Basses"); add (M_ATT, 0); add (M_HOLD, 60); add (M_DEC, 180); add (M_LENGTH, 240); add (M_REL, 20);
-            add (M_FTYPE, 0); add (M_CUT, 2200, "Tiefpass nimmt Höhen raus, der Bass bleibt im Fokus"); add (M_RES, 0.1f);
-            add (M_LOWCUT, 30, "Unter 30 Hz kostet nur Headroom");
-            add (M_SUBLVL, bass < 0.5f ? 0.7f : 0.35f, bass < 0.5f ? "Das Sample hat wenig Bass, der Sub trägt das Fundament" : "Das Sample hat schon Bass, der Sub stützt nur");
-            add (M_CLKLVL, r.attackMs > 5 ? 0.3f : 0.1f, r.attackMs > 5 ? "Weicher Anfang im Sample, der Click gibt Attack" : "Das Sample hat genug Attack");
-            add (M_DRV, 0.45f, "Verzerrung macht den Bass auf kleinen Boxen hörbar"); add (M_DRVTYPE, 3); add (M_DRVTONE, 5000);
-            break;
-        case FULLKICK:
-            tuneTo (52.0f);
-            add (O (osc, O_FREE), 0); add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 40); add (M_DEC, 320); add (M_LENGTH, 320, "Rund 320 ms passen zu etwa 180 BPM");
-            add (M_FTYPE, 3); add (M_LOWCUT, 30);
-            add (M_SUBLVL, bass < 0.4f ? 0.5f : 0.2f, bass < 0.4f ? "Wenig Bass im Sample, der Sub ergänzt ihn" : "Genug Bass im Sample");
-            add (M_CLKLVL, r.attackMs > 3 ? 0.5f : 0.15f, r.attackMs > 3 ? "Weicher Anfang, der Click schärft den Attack" : "Der Attack ist schon da");
-            add (M_DRV, 0.5f); add (M_DRVTYPE, 3); add (M_DRVTONE, 7000);
-            break;
-        case TOPKICK:
-            add (O (osc, O_PITCH), 0); add (O (osc, O_FREE), 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
-            add (M_GATE, 0); add (M_ATT, 0); add (M_HOLD, 5); add (M_DEC, 70); add (M_LENGTH, 75);
-            add (M_FTYPE, 3); add (M_LOWCUT, 240, "Der Bass gehört der Kick, hier wird alles darunter entfernt");
-            add (M_SUBLVL, 0); add (M_CLKLVL, 0.3f); add (M_DRV, 0.5f); add (M_DRVTYPE, 3); add (M_DRVTONE, 7000);
-            out.playNote = 41;
-            break;
-        case MELO:
-            add (O (osc, O_PITCH), 1); add (O (osc, O_ROOT), (float) (r.tonal ? r.note : 60)); add (O (osc, O_TUNE), r.tonal ? -r.cents / 100.0f : 0.0f);
-            add (O (osc, O_FREE), 1); add (M_FTYPE, 3);
-            add (M_LOWCUT, r.tonal ? std::clamp (r.hz * 0.7f, 120.0f, 300.0f) : 150.0f, "Lässt unten Platz für den Kick-Bass");
-            add (M_SUBLVL, 0); add (M_CLKLVL, 0); add (M_DRV, 0.1f);
-            out.playNote = r.tonal ? r.note : 60;
-            break;
-        default:
-            add (O (osc, O_PITCH), 1); add (O (osc, O_ROOT), (float) (r.tonal ? r.note : 60)); add (O (osc, O_TUNE), r.tonal ? -r.cents / 100.0f : 0.0f);
-            add (O (osc, O_FREE), 0, "Stabs leben von einer kurzen Hüllkurve"); add (M_GATE, 0);
-            add (M_ATT, 1); add (M_HOLD, 20); add (M_DEC, 260); add (M_LENGTH, 280); add (M_REL, 120);
-            add (M_FTYPE, 0); add (M_CUT, 3000); add (M_RES, 0.2f); add (M_FENV, 2); add (M_FDEC, 160);
-            add (M_LOWCUT, 180, "Unter 180 Hz stört ein Stab nur den Bass");
-            add (M_SUBLVL, 0); add (M_CLKLVL, 0);
-            out.playNote = r.tonal ? r.note : 60;
-            break;
+        add (LY_PITCH, 0); add (LY_FREE, 0, "Kurze Hüllkurve lässt nur den Anschlag übrig");
+        add (LY_HOLD, 0); add (LY_ATT, 0); add (LY_LEN, 70);
+        add (LY_FTYPE, 1); add (LY_CUT, 300); add (LY_LOWCUT, 240, "Der Bass gehört der Bass-Ebene, hier wird alles darunter entfernt");
+        add (LY_SUB, 0); add (LY_DRV, 0.35f); add (LY_DRVTYPE, 3); add (LY_DRVTONE, 7000);
+        out.playNote = 41;
+    }
+    else if (mode == KICK && layer == 1)
+    {
+        tuneTo (52.0f);
+        add (LY_FREE, 0, "Die Hüllkurve bestimmt die Länge, damit der Schwanz vor der nächsten Kick endet");
+        add (LY_HOLD, 1, "Spielart Notenlänge: Die Note im Piano Roll kürzt den Bass"); add (LY_ATT, 0); add (LY_LEN, 300); add (LY_REL, 20);
+        add (LY_FTYPE, 0); add (LY_CUT, 2500, "Tiefpass nimmt Höhen raus, der Bass bleibt im Fokus"); add (LY_RES, 0.1f);
+        add (LY_LOWCUT, 30, "Unter 30 Hz kostet nur Headroom");
+        add (LY_SUB, bass < 0.5f ? 0.7f : 0.3f, bass < 0.5f ? "Das Sample hat wenig Bass, der Sub trägt das Fundament" : "Das Sample hat schon Bass, der Sub stützt nur");
+        add (LY_DRV, 0.35f, "Verzerrung macht den Bass auf kleinen Boxen hörbar"); add (LY_DRVTYPE, 3); add (LY_DRVTONE, 5000);
+    }
+    else if (mode == KICK)
+    {
+        add (LY_PITCH, 0); add (LY_FREE, 1); add (LY_LOWCUT, 150, "Die dritte Ebene bleibt aus dem Bass heraus");
+        add (LY_SUB, 0); add (LY_DRV, 0.1f);
+        out.playNote = 29;
+    }
+    else
+    {
+        add (LY_PITCH, 1); add (LY_ROOT, (float) (r.tonal ? r.note : 60)); add (LY_TUNE, r.tonal ? -r.cents / 100.0f : 0.0f);
+        add (LY_FREE, mode == MELO ? 1.0f : 0.0f, mode == MELO ? "Das Sample klingt ganz aus" : "Stabs leben von einer kurzen Hüllkurve");
+        add (LY_LOWCUT, r.tonal ? std::clamp (r.hz * 0.7f, 120.0f, 300.0f) : 150.0f, "Lässt unten Platz für den Kick-Bass");
+        add (LY_SUB, 0);
+        out.playNote = r.tonal ? r.note : 60;
     }
     return out;
 }

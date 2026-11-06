@@ -2,77 +2,65 @@
 #pragma once
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 #include <algorithm>
 
 namespace tk
 {
-enum Mode { MELO = 0, STAB, TOPKICK, KICKBASS, FULLKICK, NUM_MODES };
-inline const char* modeName (int m)
+enum Mode { MELO = 0, STAB, KICK, NUM_MODES };
+inline const char* modeName (int m) { static const char* n[] = { "Melo", "Stab", "Kick" }; return n[m]; }
+inline const char* modeShort (int m) { return modeName (m); }
+inline bool modeIsMono (int m) { return m == KICK; }
+inline const char* layerName (int mode, int l)
 {
-    static const char* n[] = { "Melo One-Shot", "Stab", "Topkick", "Kickbass", "Full Kick" };
-    return n[m];
+    static const char* kick[] = { "Topkick", "Bass", "Layer" }, *syn[] = { "Ebene A", "Ebene B", "Ebene C" };
+    return mode == KICK ? kick[l] : syn[l];
 }
-inline const char* modeShort (int m)
-{
-    static const char* n[] = { "Melo", "Stab", "Top", "KBass", "Kick" };
-    return n[m];
-}
-inline bool modeIsMono (int m) { return m >= TOPKICK; }
 
 // Globale Parameter
 enum { G_MODE = 0, G_MASTER, G_QUALITY, G_LIMIT, G_COUNT };
 
-// Parameter, die jeder Modus getrennt besitzt
+// Jede Ebene ist ein kleiner eigener Synth
+constexpr int NUM_LAYERS = 3;
 enum
 {
-    M_TUNE = 0, M_FINE,
-    M_PAMT, M_PTIME, M_PCURVE,
-    M_ATT, M_HOLD, M_DEC, M_SUS, M_REL, M_ACURVE, M_GATE,
-    M_FTYPE, M_CUT, M_RES, M_FENV, M_FDEC,
-    M_CLKLVL, M_CLKTONE, M_CLKLEN, M_CLKNOISE,
-    M_SUBLVL, M_SUBOCT,
-    M_DRV, M_DRVTYPE, M_DRVTONE,
-    M_CHORD, M_STRUM,
-    M_LOWCUT, M_VEL, M_LEVEL,
-    M_LENGTH, M_OSC0,
-    M_COUNT = M_OSC0 + 3 * 13
+    LY_LVL = 0, LY_MUTE, LY_SOLO, LY_SRC, LY_WAVE, LY_TUNE, LY_FINE, LY_UNI, LY_DETUNE, LY_WIDTH, LY_PAN,
+    LY_SUB, LY_SUBOCT,
+    LY_START, LY_ROOT, LY_PITCH, LY_LOOP, LY_FREE,
+    LY_HOLD, LY_LEN, LY_ATT, LY_CURVE, LY_SUS, LY_REL,
+    LY_PAMT, LY_PTIME, LY_PCURVE,
+    LY_FTYPE, LY_CUT, LY_RES, LY_FAMT, LY_FDEC,
+    LY_DRV, LY_DRVTYPE, LY_DRVTONE, LY_LOWCUT,
+    LY_COUNT
 };
 
-// Drei Oszillatoren je Modus, jeder spielt eine Welle oder ein Sample
-constexpr int NUM_OSCS = 3;
-enum { O_LVL = 0, O_SRC, O_WAVE, O_TUNE, O_FINE, O_UNI, O_DETUNE, O_WIDTH, O_START, O_ROOT, O_PITCH, O_LOOP, O_FREE, O_COUNT };
-static_assert (M_COUNT == M_OSC0 + NUM_OSCS * O_COUNT, "M_COUNT passt nicht zu den Oszillatoren");
-constexpr int O (int osc, int p) { return M_OSC0 + osc * O_COUNT + p; }
-constexpr int sampleSlot (int mode, int osc) { return mode * NUM_OSCS + osc; }
+// Parameter je Modus
+enum { M_TUNE = 0, M_FINE, M_CHORD, M_STRUM, M_VEL, M_LEVEL, M_LAYER0, M_COUNT = M_LAYER0 + NUM_LAYERS * LY_COUNT };
+constexpr int Y (int layer, int p) { return M_LAYER0 + layer * LY_COUNT + p; }
+constexpr int sampleSlot (int mode, int layer) { return mode * NUM_LAYERS + layer; }
 
-// FX
-constexpr int NUM_SLOTS = 8;
+// FX: 8 Master-Slots plus 3 Slots je Ebene
+constexpr int NUM_MASTER_SLOTS = 8, SLOTS_PER_LAYER = 3, NUM_SLOTS = NUM_MASTER_SLOTS + NUM_LAYERS * SLOTS_PER_LAYER;
+constexpr int layerSlot (int layer, int i) { return NUM_MASTER_SLOTS + layer * SLOTS_PER_LAYER + i; }
 enum { S_ON = 0, S_TYPE, S_MIX, S_P1, S_P2, S_P3, S_P4, S_P5, S_P6, S_COUNT };
 constexpr int FX_PARAMS = 6;
 
-// interne Automation
-constexpr int NUM_LANES = 4;
-constexpr int LANE_POINTS = 64;
-enum { L_ON = 0, L_TARGET, L_AMOUNT, L_RATE, L_TRIG, L_COUNT };
-
-// frei ziehbare Modulationsquellen
-constexpr int NUM_LFOS = 3, NUM_ENVS = 3, NUM_SOURCES = NUM_LFOS + NUM_ENVS, NUM_MODS = 16;
-enum { LF_SHAPE = 0, LF_SYNC, LF_HZ, LF_DIV, LF_RETRIG, LF_COUNT };
+// Modulation wie in Vital: Quellen laufen pro Stimme, LFO-Formen werden gezeichnet
+constexpr int NUM_LFOS = 4, NUM_ENVS = 3, NUM_SOURCES = NUM_LFOS + NUM_ENVS, NUM_MODS = 32, LFO_POINTS = 64;
+enum { LF_SYNC = 0, LF_HZ, LF_DIV, LF_TRIG, LF_COUNT };
 enum { EV_ATT = 0, EV_DEC, EV_SUS, EV_REL, EV_CURVE, EV_COUNT };
 enum { MD_SOURCE = 0, MD_TARGET, MD_AMOUNT, MD_COUNT };
 
 constexpr int MODE_BASE = G_COUNT;
 constexpr int SLOT_BASE = MODE_BASE + NUM_MODES * M_COUNT;
-constexpr int LANE_BASE = SLOT_BASE + NUM_SLOTS * S_COUNT;
-constexpr int LFO_BASE = LANE_BASE + NUM_LANES * L_COUNT;
+constexpr int LFO_BASE = SLOT_BASE + NUM_SLOTS * S_COUNT;
 constexpr int ENV_BASE = LFO_BASE + NUM_LFOS * LF_COUNT;
 constexpr int MOD_BASE = ENV_BASE + NUM_ENVS * EV_COUNT;
 constexpr int NUM_PARAMS = MOD_BASE + NUM_MODS * MD_COUNT;
 
 constexpr int modeParam (int mode, int p) { return MODE_BASE + mode * M_COUNT + p; }
 constexpr int slotParam (int slot, int p) { return SLOT_BASE + slot * S_COUNT + p; }
-constexpr int laneParam (int lane, int p) { return LANE_BASE + lane * L_COUNT + p; }
 constexpr int lfoParam (int i, int p) { return LFO_BASE + i * LF_COUNT + p; }
 constexpr int envParam (int i, int p) { return ENV_BASE + i * EV_COUNT + p; }
 constexpr int modSlot (int i, int p) { return MOD_BASE + i * MD_COUNT + p; }
@@ -196,84 +184,73 @@ inline const std::vector<std::string>& laneRates()
     return v;
 }
 inline double laneBeats (int r) { static const double b[] = { 16, 8, 4, 2, 1, 0.5, 0.25, 0.125 }; return b[std::clamp (r, 0, 7)]; }
-inline const std::vector<std::string>& laneTrigs()
+inline const std::vector<std::string>& lfoTrigs()
 {
-    static const std::vector<std::string> v { "Je Note", "Loop Note", "Loop Takt" };
+    static const std::vector<std::string> v { "Frei", "Je Note", "Einmal" };
     return v;
 }
 
-// ---------------- Startklang je Modus --------------------------------------
+// ---------------- Startklang -----------------------------------------------
 inline float modeDefault (int mode, int p)
 {
-    //                         Melo    Stab   Top     KBass   Kick
-    #define D(a,b,c,d,e) { static const float t[5] = { a, b, c, d, e }; return t[mode]; }
     switch (p)
     {
-        case M_TUNE:    D(0,     0,     0,      0,      0)
-        case M_FINE:    D(0,     0,     0,      0,      0)
-        case M_PAMT:    D(0,     0,     60,     24,     48)
-        case M_PTIME:   D(20,    20,    18,     35,     60)
-        case M_PCURVE:  D(0.5f,  0.5f,  0.7f,   0.7f,   0.7f)
-        case M_ATT:     D(1,     1,     0,      0,      0)
-        case M_HOLD:    D(0,     20,    5,      60,     40)
-        case M_DEC:     D(450,   260,   70,     180,    320)
-        case M_SUS:     D(0,     0,     0,      0,      0)
-        case M_REL:     D(180,   120,   10,     20,     20)
-        case M_ACURVE:  D(0.5f,  0.55f, 0.6f,   0.35f,  0.5f)
-        case M_GATE:    D(0,     0,     0,      2,      0)
-        case M_LENGTH:  D(450,   280,   75,     240,    360)
-        case M_FTYPE:   D(0,     0,     0,      0,      0)
-        case M_CUT:     D(3500,  2600,  12000,  1800,   9000)
-        case M_RES:     D(0.15f, 0.25f, 0.1f,   0.1f,   0.1f)
-        case M_FENV:    D(1.5f,  2.5f,  0,      0,      0)
-        case M_FDEC:    D(220,   160,   60,     120,    120)
-        case M_CLKLVL:  D(0,     0,     0.8f,   0.1f,   0.6f)
-        case M_CLKTONE: D(3000,  3000,  4500,   2500,   3500)
-        case M_CLKLEN:  D(4,     4,     8,      4,      6)
-        case M_CLKNOISE:D(0.3f,  0.3f,  0.3f,   0.2f,   0.35f)
-        case M_SUBLVL:  D(0,     0,     0,      0.7f,   0.35f)
-        case M_SUBOCT:  D(0,     0,     0,      0,      0)
-        case M_DRV:     D(0.1f,  0.2f,  0.7f,   0.5f,   0.65f)
-        case M_DRVTYPE: D(0,     0,     3,      3,      3)
-        case M_DRVTONE: D(14000, 12000, 7000,   5000,   7000)
-        case M_CHORD:   D(0,     3,     0,      0,      0)
-        case M_STRUM:   D(0,     0,     0,      0,      0)
-        case M_LOWCUT:  D(120,   180,   240,    30,     30)
-        case M_VEL:     D(0.3f,  0.3f,  0,      0,      0)
-        case M_LEVEL:   D(-9,    -9,    -6,     -6,     -6)
+        case M_CHORD: return mode == STAB ? 3.0f : 0.0f;
+        case M_VEL:   return mode == KICK ? 0.0f : 0.3f;
+        case M_LEVEL: return -6;
         default: return 0;
     }
-    #undef D
 }
-inline float oscDefault (int mode, int osc, int p)
+inline float layerDefault (int mode, int l, int p)
 {
-    #define D(a,b,c,d,e) { static const float t[5] = { a, b, c, d, e }; return t[mode]; }
+    struct E { int p; float v; };
+    static const E melo[] = { {LY_WAVE,1.7f},{LY_UNI,3},{LY_DETUNE,10},{LY_WIDTH,0.6f},{LY_LEN,450},{LY_REL,180},{LY_ATT,1},{LY_CUT,3500},{LY_FAMT,1.5f},{LY_FDEC,220},{LY_DRV,0.1f},{LY_LOWCUT,120} };
+    static const E stab[] = { {LY_WAVE,2},{LY_UNI,5},{LY_DETUNE,18},{LY_WIDTH,0.85f},{LY_LEN,280},{LY_REL,120},{LY_ATT,1},{LY_CUT,2600},{LY_RES,0.25f},{LY_FAMT,2.5f},{LY_FDEC,160},{LY_DRV,0.2f},{LY_LOWCUT,180} };
+    static const E top[]  = { {LY_LVL,0.8f},{LY_WAVE,1.6f},{LY_PAMT,60},{LY_PTIME,18},{LY_PCURVE,0.7f},{LY_LEN,70},{LY_CURVE,0.6f},{LY_FTYPE,1},{LY_CUT,300},{LY_DRV,0.4f},{LY_DRVTYPE,3},{LY_DRVTONE,7000},{LY_LOWCUT,240} };
+    static const E bass[] = { {LY_PAMT,36},{LY_PTIME,45},{LY_PCURVE,0.7f},{LY_LEN,300},{LY_CURVE,0.3f},{LY_HOLD,1},{LY_SUS,0},{LY_DRV,0.35f},{LY_DRVTYPE,3},{LY_DRVTONE,5000},{LY_LOWCUT,30} };
+    static const E lay[]  = { {LY_MUTE,1},{LY_LVL,0.7f},{LY_WAVE,2},{LY_LEN,120},{LY_LOWCUT,120} };
+    const auto find = [&] (const E* e, int n, float def) { for (int i = 0; i < n; ++i) if (e[i].p == p) return e[i].v; return def; };
+    float def = 0;
     switch (p)
     {
-        case O_LVL:    if (osc > 0) return 0; return 1;
-        case O_WAVE:   D(1.7f, 2.0f,  1.6f, 0.25f, 0.0f)
-        case O_UNI:    D(3,    5,     1,    1,     1)
-        case O_DETUNE: D(10,   18,    0,    0,     0)
-        case O_WIDTH:  D(0.6f, 0.85f, 0,    0,     0)
-        case O_ROOT:   D(60,   60,    29,   29,    29)
-        case O_PITCH:  D(1,    1,     0,    1,     0)
-        case O_FREE:   D(1,    1,     1,    0,     1)
-        default: return 0;
+        case LY_LVL: def = 1; break;
+        case LY_UNI: def = 1; break;
+        case LY_ROOT: def = mode == KICK ? 29.0f : 60.0f; break;
+        case LY_LEN: def = 300; break;
+        case LY_CURVE: def = 0.5f; break;
+        case LY_REL: def = 20; break;
+        case LY_PTIME: def = 30; break;
+        case LY_PCURVE: def = 0.5f; break;
+        case LY_CUT: def = 20000; break;
+        case LY_FDEC: def = 120; break;
+        case LY_DRVTONE: def = 14000; break;
+        case LY_LOWCUT: def = 20; break;
+        case LY_FREE: def = 1; break;
+        case LY_PITCH: def = mode == KICK ? 0.0f : 1.0f; break;
+        default: break;
     }
-    #undef D
+    if (mode == KICK)
+    {
+        if (l == 0) return find (top, sizeof (top) / sizeof (E), def);
+        if (l == 1) return find (bass, sizeof (bass) / sizeof (E), def);
+        return find (lay, sizeof (lay) / sizeof (E), def);
+    }
+    if (l > 0) { if (p == LY_MUTE) return 1; return find (lay, sizeof (lay) / sizeof (E), def); }
+    return mode == MELO ? find (melo, sizeof (melo) / sizeof (E), def) : find (stab, sizeof (stab) / sizeof (E), def);
 }
 
-/** Einstellungen nach dem Fertig-Rendern: Alles ist neutral, nur das Sample klingt unveraendert. */
+/** Einstellungen nach dem Fertig-Rendern: Alles ist neutral, nur das Sample auf Ebene 1 klingt unveraendert. */
 struct FrozenValue { int index; float value; };
 inline std::vector<FrozenValue> frozenValues (int mode, int note)
 {
     std::vector<FrozenValue> v { { G_MODE, (float) mode }, { G_MASTER, 0 }, { G_QUALITY, 0 }, { G_LIMIT, 0 } };
-    const std::pair<int, float> m[] = {
-        { M_CLKLVL, 0 }, { M_SUBLVL, 0 }, { M_DRV, 0 }, { M_PAMT, 0 }, { M_FENV, 0 }, { M_FTYPE, 3 },
-        { M_LOWCUT, 20 }, { M_LEVEL, 0 }, { M_VEL, 0 }, { M_CHORD, 0 }, { M_STRUM, 0 }, { M_TUNE, 0 }, { M_FINE, 0 },
-        { O (0, O_LVL), 1 }, { O (0, O_SRC), 1 }, { O (0, O_ROOT), (float) note }, { O (0, O_START), 0 }, { O (0, O_TUNE), 0 }, { O (0, O_FINE), 0 },
-        { O (0, O_LOOP), 0 }, { O (0, O_FREE), 1 }, { O (1, O_LVL), 0 }, { O (2, O_LVL), 0 } };
-    for (auto& e : m) v.push_back ({ modeParam (mode, e.first), e.second });
+    for (auto& e : std::initializer_list<std::pair<int, float>> { { M_LEVEL, 0 }, { M_VEL, 0 }, { M_CHORD, 0 }, { M_STRUM, 0 }, { M_TUNE, 0 }, { M_FINE, 0 } })
+        v.push_back ({ modeParam (mode, e.first), e.second });
+    const std::pair<int, float> y[] = {
+        { LY_LVL, 1 }, { LY_MUTE, 0 }, { LY_SOLO, 0 }, { LY_SRC, 1 }, { LY_ROOT, (float) note }, { LY_START, 0 }, { LY_TUNE, 0 }, { LY_FINE, 0 }, { LY_PAN, 0 },
+        { LY_LOOP, 0 }, { LY_FREE, 1 }, { LY_SUB, 0 }, { LY_DRV, 0 }, { LY_PAMT, 0 }, { LY_FAMT, 0 }, { LY_FTYPE, 3 }, { LY_LOWCUT, 20 } };
+    for (auto& e : y) v.push_back ({ modeParam (mode, Y (0, e.first)), e.second });
+    for (int l = 1; l < NUM_LAYERS; ++l) { v.push_back ({ modeParam (mode, Y (l, LY_MUTE)), 1 }); v.push_back ({ modeParam (mode, Y (l, LY_SOLO)), 0 }); }
     return v;
 }
 
@@ -293,101 +270,87 @@ inline const std::vector<ParamDef>& params()
             d.def = (float) def; d.kind = CHOICE; d.choices = std::move (items);
             t[(size_t) i] = std::move (d);
         };
+        const auto offOn = [] { return std::vector<std::string> { "Aus", "An" }; };
 
-        ch (G_MODE, "mode", "Modus", { "Melo One-Shot", "Stab", "Topkick", "Kickbass", "Full Kick" }, FULLKICK);
+        ch (G_MODE, "mode", "Modus", { "Melo", "Stab", "Kick" }, KICK);
         fl (G_MASTER, "master", "Master", -36, 6, 0, 1, "dB");
         ch (G_QUALITY, "quality", "Qualität", { "1x", "2x", "4x" }, 1);
-        ch (G_LIMIT, "limit", "Schutz-Limiter", { "Aus", "An" }, 1);
+        ch (G_LIMIT, "limit", "Schutz-Limiter", offOn(), 1);
 
         for (int m = 0; m < NUM_MODES; ++m)
         {
             const std::string pi = "m" + std::to_string (m) + "_", pn = std::string (modeShort (m)) + " ";
-            auto F = [&] (int p, const char* id, const char* name, float mn, float mx, float skew, const char* unit)
+            const auto F = [&] (int p, const char* id, const char* name, float mn, float mx, float skew, const char* unit)
             { fl (modeParam (m, p), pi + id, pn + name, mn, mx, modeDefault (m, p), skew, unit); };
-            auto C = [&] (int p, const char* id, const char* name, std::vector<std::string> items)
-            { ch (modeParam (m, p), pi + id, pn + name, std::move (items), (int) modeDefault (m, p)); };
-
             F (M_TUNE, "tune", "Tune", -24, 24, 1, "st");
             F (M_FINE, "fine", "Fein", -100, 100, 1, "ct");
-            F (M_PAMT, "pamt", "Pitch Menge", -24, 84, 1, "st");
-            F (M_PTIME, "ptime", "Pitch Zeit", 1, 800, 0.35f, "ms");
-            F (M_PCURVE, "pcurve", "Pitch Kurve", 0, 1, 1, "");
-            F (M_ATT, "att", "Attack", 0, 500, 0.3f, "ms");
-            F (M_HOLD, "hold", "Hold", 0, 2000, 0.3f, "ms");
-            F (M_DEC, "dec", "Decay", 5, 4000, 0.3f, "ms");
-            F (M_SUS, "sus", "Sustain", 0, 1, 1, "");
-            F (M_REL, "rel", "Release", 1, 2000, 0.3f, "ms");
-            F (M_ACURVE, "acurve", "Hkurve", 0, 1, 1, "");
-            C (M_GATE, "gate", "Spielart", { "One-Shot", "Gate", "Notenlänge" });
-            C (M_FTYPE, "ftype", "Filterart", { "LP", "HP", "BP", "Aus" });
-            F (M_CUT, "cut", "Cutoff", 20, 20000, 0.3f, "Hz");
-            F (M_RES, "res", "Resonanz", 0, 1, 1, "");
-            F (M_FENV, "fenv", "Filter Env", -6, 6, 1, "oct");
-            F (M_FDEC, "fdec", "Filter Decay", 1, 2000, 0.35f, "ms");
-            F (M_CLKLVL, "clklvl", "Click Pegel", 0, 1, 1, "");
-            F (M_CLKTONE, "clktone", "Click Ton", 200, 14000, 0.35f, "Hz");
-            F (M_CLKLEN, "clklen", "Click Länge", 1, 60, 0.5f, "ms");
-            F (M_CLKNOISE, "clknoise", "Click Rauschen", 0, 1, 1, "");
-            F (M_SUBLVL, "sublvl", "Sub Pegel", 0, 1, 1, "");
-            C (M_SUBOCT, "suboct", "Sub Oktave", { "0", "-1", "-2" });
-            F (M_DRV, "drv", "Drive", 0, 1, 1, "");
-            C (M_DRVTYPE, "drvtype", "Drive Art", driveTypes());
-            F (M_DRVTONE, "drvtone", "Drive Ton", 500, 20000, 0.35f, "Hz");
-            C (M_CHORD, "chord", "Akkord", chordNames());
+            ch (modeParam (m, M_CHORD), pi + "chord", pn + "Akkord", chordNames(), (int) modeDefault (m, M_CHORD));
             F (M_STRUM, "strum", "Strum", 0, 40, 1, "ms");
-            F (M_LOWCUT, "lowcut", "Lowcut", 20, 800, 0.4f, "Hz");
             F (M_VEL, "vel", "Velocity", 0, 1, 1, "");
             F (M_LEVEL, "level", "Pegel", -36, 6, 1, "dB");
-            F (M_LENGTH, "length", "Länge", 5, 6000, 0.3f, "ms");
-            for (int o = 0; o < NUM_OSCS; ++o)
+            for (int l = 0; l < NUM_LAYERS; ++l)
             {
-                const std::string oi = pi + "o" + std::to_string (o) + "_", on = pn + "Osz " + std::string (1, (char) ('A' + o)) + " ";
-                auto OF = [&] (int p, const char* id, const char* name, float mn, float mx, float skew, const char* unit)
-                { fl (modeParam (m, O (o, p)), oi + id, on + name, mn, mx, oscDefault (m, o, p), skew, unit); };
-                auto OC = [&] (int p, const char* id, const char* name, std::vector<std::string> items)
-                { ch (modeParam (m, O (o, p)), oi + id, on + name, std::move (items), (int) oscDefault (m, o, p)); };
-                OF (O_LVL, "lvl", "Pegel", 0, 1, 1, "");
-                OC (O_SRC, "src", "Quelle", { "Welle", "Sample" });
-                OF (O_WAVE, "wave", "Welle", 0, 3, 1, "");
-                OF (O_TUNE, "tune", "Tune", -24, 24, 1, "st");
-                OF (O_FINE, "fine", "Fein", -100, 100, 1, "ct");
-                OF (O_UNI, "uni", "Stimmen", 1, 7, 1, "");
-                OF (O_DETUNE, "detune", "Verstimmung", 0, 60, 0.6f, "ct");
-                OF (O_WIDTH, "width", "Breite", 0, 1, 1, "");
-                OF (O_START, "start", "Sample Start", 0, 1, 1, "");
-                OF (O_ROOT, "root", "Grundton", 0, 127, 1, "");
-                OC (O_PITCH, "pitch", "Tonhöhe", { "Fest", "Note", "Note + Kurve" });
-                OC (O_LOOP, "loop", "Loop", { "Aus", "An" });
-                OC (O_FREE, "free", "Länge", { "Hüllkurve", "Ganz" });
+                const std::string oi = pi + "y" + std::to_string (l) + "_", on = pn + layerName (m, l) + " ";
+                const auto OF = [&] (int p, const char* id, const char* name, float mn, float mx, float skew, const char* unit)
+                { fl (modeParam (m, Y (l, p)), oi + id, on + name, mn, mx, layerDefault (m, l, p), skew, unit); };
+                const auto OC = [&] (int p, const char* id, const char* name, std::vector<std::string> items)
+                { ch (modeParam (m, Y (l, p)), oi + id, on + name, std::move (items), (int) layerDefault (m, l, p)); };
+                OF (LY_LVL, "lvl", "Pegel", 0, 1, 1, "");
+                OC (LY_MUTE, "mute", "Stumm", offOn());
+                OC (LY_SOLO, "solo", "Solo", offOn());
+                OC (LY_SRC, "src", "Quelle", { "Welle", "Sample" });
+                OF (LY_WAVE, "wave", "Welle", 0, 4, 1, "");
+                OF (LY_TUNE, "tune", "Tune", -24, 24, 1, "st");
+                OF (LY_FINE, "fine", "Fein", -100, 100, 1, "ct");
+                OF (LY_UNI, "uni", "Stimmen", 1, 7, 1, "");
+                OF (LY_DETUNE, "detune", "Verstimmung", 0, 60, 0.6f, "ct");
+                OF (LY_WIDTH, "width", "Breite", 0, 1, 1, "");
+                OF (LY_PAN, "pan", "Pan", -1, 1, 1, "");
+                OF (LY_SUB, "sub", "Sub", 0, 1, 1, "");
+                OC (LY_SUBOCT, "suboct", "Sub Oktave", { "0", "-1", "-2" });
+                OF (LY_START, "start", "Sample Start", 0, 1, 1, "");
+                OF (LY_ROOT, "root", "Grundton", 0, 127, 1, "");
+                OC (LY_PITCH, "pitch", "Tonhöhe", { "Fest", "Note", "Note + Kurve" });
+                OC (LY_LOOP, "loop", "Loop", offOn());
+                OC (LY_FREE, "free", "Sample Länge", { "Hüllkurve", "Ganz" });
+                OC (LY_HOLD, "hold", "Spielart", { "One-Shot", "Notenlänge" });
+                OF (LY_LEN, "len", "Länge", 5, 6000, 0.3f, "ms");
+                OF (LY_ATT, "att", "Attack", 0, 500, 0.3f, "ms");
+                OF (LY_CURVE, "curve", "Kurve", 0, 1, 1, "");
+                OF (LY_SUS, "sus", "Sustain", 0, 1, 1, "");
+                OF (LY_REL, "rel", "Release", 1, 2000, 0.3f, "ms");
+                OF (LY_PAMT, "pamt", "Pitch Menge", -24, 84, 1, "st");
+                OF (LY_PTIME, "ptime", "Pitch Zeit", 1, 800, 0.35f, "ms");
+                OF (LY_PCURVE, "pcurve", "Pitch Kurve", 0, 1, 1, "");
+                OC (LY_FTYPE, "ftype", "Filterart", { "LP", "HP", "BP", "Aus" });
+                OF (LY_CUT, "cut", "Cutoff", 20, 20000, 0.3f, "Hz");
+                OF (LY_RES, "res", "Resonanz", 0, 1, 1, "");
+                OF (LY_FAMT, "famt", "Filter Env", -6, 6, 1, "oct");
+                OF (LY_FDEC, "fdec", "Filter Zeit", 1, 2000, 0.35f, "ms");
+                OF (LY_DRV, "drv", "Drive", 0, 1, 1, "");
+                OC (LY_DRVTYPE, "drvtype", "Drive Art", driveTypes());
+                OF (LY_DRVTONE, "drvtone", "Drive Ton", 500, 20000, 0.35f, "Hz");
+                OF (LY_LOWCUT, "lowcut", "Lowcut", 20, 800, 0.4f, "Hz");
             }
         }
         for (int s = 0; s < NUM_SLOTS; ++s)
         {
-            const std::string pi = "s" + std::to_string (s) + "_", pn = "FX" + std::to_string (s + 1) + " ";
-            ch (slotParam (s, S_ON), pi + "on", pn + "An", { "Aus", "An" }, 1);
+            const std::string pi = "s" + std::to_string (s) + "_";
+            const std::string pn = s < NUM_MASTER_SLOTS ? "FX" + std::to_string (s + 1) + " "
+                                                        : "Ebene" + std::to_string ((s - NUM_MASTER_SLOTS) / SLOTS_PER_LAYER + 1) + " FX" + std::to_string ((s - NUM_MASTER_SLOTS) % SLOTS_PER_LAYER + 1) + " ";
+            ch (slotParam (s, S_ON), pi + "on", pn + "An", offOn(), 1);
             ch (slotParam (s, S_TYPE), pi + "type", pn + "Effekt", fxNames(), 0);
             fl (slotParam (s, S_MIX), pi + "mix", pn + "Mix", 0, 1, 1, 1, "");
             for (int k = 0; k < FX_PARAMS; ++k)
                 fl (slotParam (s, S_P1 + k), pi + "p" + std::to_string (k + 1), pn + "Wert " + std::to_string (k + 1), 0, 1, 0.5f, 1, "");
         }
-        for (int l = 0; l < NUM_LANES; ++l)
-        {
-            const std::string pi = "l" + std::to_string (l) + "_", pn = "Auto" + std::to_string (l + 1) + " ";
-            ch (laneParam (l, L_ON), pi + "on", pn + "An", { "Aus", "An" }, 0);
-            ParamDef d; d.id = pi + "target"; d.name = pn + "Ziel"; d.min = -1; d.max = (float) NUM_PARAMS - 1.0f; d.def = -1; d.kind = INT;
-            t[(size_t) laneParam (l, L_TARGET)] = std::move (d);
-            fl (laneParam (l, L_AMOUNT), pi + "amount", pn + "Menge", -1, 1, 0.5f, 1, "");
-            ch (laneParam (l, L_RATE), pi + "rate", pn + "Länge", laneRates(), 4);
-            ch (laneParam (l, L_TRIG), pi + "trig", pn + "Start", laneTrigs(), 0);
-        }
         for (int i = 0; i < NUM_LFOS; ++i)
         {
             const std::string pi = "lfo" + std::to_string (i) + "_", pn = "LFO " + std::to_string (i + 1) + " ";
-            ch (lfoParam (i, LF_SHAPE), pi + "shape", pn + "Form", { "Sinus", "Dreieck", "Säge", "Rechteck", "Zufall" }, 0);
             ch (lfoParam (i, LF_SYNC), pi + "sync", pn + "Takt", { "Frei", "Takt" }, 1);
             fl (lfoParam (i, LF_HZ), pi + "hz", pn + "Tempo", 0.02f, 40, 2.0f, 0.35f, "Hz");
             ch (lfoParam (i, LF_DIV), pi + "div", pn + "Teiler", laneRates(), 5);
-            ch (lfoParam (i, LF_RETRIG), pi + "retrig", pn + "Neustart", { "Frei", "Je Note" }, 1);
+            ch (lfoParam (i, LF_TRIG), pi + "trig", pn + "Start", lfoTrigs(), 1);
         }
         for (int i = 0; i < NUM_ENVS; ++i)
         {

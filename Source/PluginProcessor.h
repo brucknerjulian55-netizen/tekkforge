@@ -35,7 +35,7 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     juce::MidiKeyboardState keyboard;
-    std::array<std::array<std::atomic<float>, tk::LANE_POINTS>, tk::NUM_LANES> curves;
+    tk::Curves curves;
     std::array<std::atomic<float>, tk::NUM_PARAMS> modView;
     tk::Engine engine;
 
@@ -53,7 +53,7 @@ public:
     void shapeLane (int lane, int shape);
 
     // Samples: je Modus und Oszillator; werden beim Speichern eingebettet
-    std::atomic<const tk::SampleData*> samples[tk::NUM_MODES * tk::NUM_OSCS];
+    std::atomic<const tk::SampleData*> samples[tk::NUM_MODES * tk::NUM_LAYERS];
     std::atomic<int> sampleVersion { 0 };
     bool loadSample (int mode, int osc, const juce::File&, juce::String& message);
     void clearSample (int mode, int osc);
@@ -70,6 +70,7 @@ public:
     /** Setzt alles auf Standard und laesst nur das gerenderte Sample im aktuellen Modus uebrig. */
     void applyRendered (std::unique_ptr<tk::SampleData>, int mode, int note);
     std::atomic<double> lastBpm { 170.0 };
+    std::atomic<bool> auditionNow { false };   // spielt die letzte Note kurz an
     juce::String currentPreset;
 
     // gezogene Modulationen
@@ -96,6 +97,7 @@ private:
     juce::AudioBuffer<float> work;
     float values[tk::NUM_PARAMS] {};
     double baseRate = 44100;
+    int auditionLeft = 0, auditionNote = 29;
     int quality = -1, maxBlock = 512;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TekkforgeProcessor)
 };
